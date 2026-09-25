@@ -1,0 +1,4 @@
+# Additional real-transcription dependency; intentionally not claimed tested/frozen.
+# Install, smoke-test with a consenting demonstration recording, then freeze locally.
+-r requirements.txt
+faster-whisper

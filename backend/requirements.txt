@@ -1,0 +1,8 @@
+# Core versions observed and smoke-tested on Python 3.12.2, 2026-09-25.
+fastapi==0.111.0
+uvicorn==0.49.0
+python-multipart==0.0.22
+httpx==0.28.1
+pydantic==2.13.4
+python-dotenv==1.2.2
+numpy==1.26.4
