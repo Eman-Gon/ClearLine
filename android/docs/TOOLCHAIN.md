@@ -6,7 +6,7 @@ The [AGP 8.9 compatibility table](https://developer.android.com/build/releases/p
 
 ## Isolated macOS Apple Silicon setup
 
-The helper does not change system Java, shell startup files, or other projects. Downloads and caches default to `/private/tmp/clearline-android-toolchain`; set `CLEARLINE_TOOLCHAIN_ROOT` to a persistent writable directory if desired. Temporary storage can disappear between reboots.
+The helper does not change system Java, shell startup files, or other projects. Downloads and caches default to `/private/tmp/clearline-android-toolchain`; set `CLEARLINE_TOOLCHAIN_ROOT` to a persistent writable directory if desired. Ordinary temporary storage can disappear between reboots. This machine now uses the user-selected T7 storage layout below; the old temporary path serves only as a compatibility symlink.
 
 ```sh
 cd /Users/emanschool/ClearLine/android
@@ -30,6 +30,47 @@ adb devices -l
 
 Installation requires a connected device with USB debugging enabled and its authorization prompt accepted on the device. A successful APK build does not prove S24 recording, model execution, offline operation, or recovery.
 
+## Persistent T7 build storage
+
+The user requested that the build use the external T7 SSD. T7 uses exFAT, so an APFS sparse bundle was created as a file on that drive to support the build tools' filesystem requirements. T7 was not formatted. The bundle has a 32 GiB maximum capacity and occupies space as its contents grow.
+
+| Purpose | Path |
+| --- | --- |
+| Persistent APFS bundle on T7 | `/Volumes/T7/ClearLine-build/ClearLineBuild.sparsebundle` |
+| Mounted build volume | `/Volumes/ClearLineBuild` |
+| JDK, SDK, Gradle, downloads, and Gradle cache | `/Volumes/ClearLineBuild/toolchain` |
+| Android build copy and generated outputs | `/Volumes/ClearLineBuild/project/android` |
+| Authoritative working source | `/Users/emanschool/ClearLine/android` |
+
+Keep T7 connected and the APFS volume mounted while using the build tools or running a build. Stop Gradle and other processes using the volume before ejecting it. The SDK installation and accepted license receipt are retained within the persistent toolchain; mounting the volume again does not require accepting the license again.
+
+After reconnecting T7, mount the bundle if `/Volumes/ClearLineBuild` is not already mounted:
+
+```sh
+hdiutil attach /Volumes/T7/ClearLine-build/ClearLineBuild.sparsebundle
+source /Volumes/ClearLineBuild/toolchain/env.sh
+cd /Volumes/ClearLineBuild/project/android
+./gradlew --no-daemon :core:test :app:assembleDebug
+```
+
+The generated `env.sh` uses the actual SSD paths. `/private/tmp/clearline-android-toolchain` is retained as a compatibility symlink to `/Volumes/ClearLineBuild/toolchain`, but the symlink itself may disappear when macOS cleans temporary storage. Prefer the persistent path above. If the environment file must be regenerated, use the existing helper:
+
+```sh
+CLEARLINE_TOOLCHAIN_ROOT=/Volumes/ClearLineBuild/toolchain \
+  /Users/emanschool/ClearLine/android/tools/setup-toolchain.sh --env \
+  > /Volumes/ClearLineBuild/toolchain/env.sh
+```
+
+Make source fixes in the original working repository, then copy them to the SSD before rebuilding. Do not make independent source edits in the build copy. For example, this updates source without copying generated outputs or replacing the SSD's local SDK configuration:
+
+```sh
+rsync -a --exclude '/.gradle/' --exclude '/.kotlin/' \
+  --exclude '**/build/' --exclude '**/.cxx/' --exclude '/local.properties' \
+  /Users/emanschool/ClearLine/android/ /Volumes/ClearLineBuild/project/android/
+```
+
+The T7 migration and full build are in progress. This storage setup does not itself establish a successful APK or device test.
+
 ## Bootstrap evidence — September 25, 2026
 
 - Build host: Apple Silicon macOS (Darwin 23.4.0).
@@ -41,6 +82,23 @@ Installation requires a connected device with USB debugging enabled and its auth
 - Standard Gradle 8.11.1 wrapper generation passed, including the distribution checksum pin.
 - The initial root `:core:test` resolved build plugins, then stopped during native-module configuration because NDK 27.2.12479018's SDK license was not yet accepted. No Android compilation or native test passed at that point.
 - A temporary JVM-only Gradle harness compiled the real core module and passed its initial seven `CallInsightsTest` tests. This is host-only contract verification, not Android execution. The first compiler attempt encountered an incremental-cache daemon error; Gradle's fallback compiler completed successfully. For concurrent development, `-Pkotlin.compiler.execution.strategy=in-process` avoids sharing the Kotlin compiler daemon.
-- SDK package installation awaits license approval; compilation results will be recorded separately when the complete project is built.
+- At the end of this initial bootstrap attempt, SDK package installation awaited license approval. That earlier blocker was resolved by the installation below.
 
 In a restricted coding sandbox, Gradle's local daemon socket and dependency downloads require the execution tool's normal escalation path. The initial sandboxed wrapper generation failed with `SocketException: Operation not permitted`; this was an environment restriction, not an Android compiler failure.
+
+## SDK installation evidence — September 25, 2026
+
+The user explicitly accepted the Android SDK license, and SDK installation completed successfully in `/private/tmp/clearline-android-toolchain/sdk`. The installed SDK license receipt exists at `licenses/android-sdk-license`; license acceptance is no longer a build blocker.
+
+The installed package metadata records:
+
+| Package | Installed revision |
+| --- | --- |
+| Android SDK Command-line Tools | 22.0 (archive build 15859902) |
+| Android SDK Platform-Tools | 37.0.1 |
+| Android SDK Platform 35 | 2 (API 35) |
+| Android SDK Build-Tools | 35.0.0 |
+| NDK | 27.2.12479018 |
+| CMake | 3.22.1 |
+
+Revisions above were read from each installed package's `package.xml`, except command-line tools, which provides `source.properties`. The full Android Gradle tests and `:app:assembleDebug` are now in progress; this entry does not claim a successful build or APK. The current `adb devices -l` check returned no attached device, so phone installation and S24 hardware acceptance remain **NOT RUN**.
