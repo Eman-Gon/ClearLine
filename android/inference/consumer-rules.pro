@@ -1,0 +1,2 @@
+-keep class com.clearline.inference.NativeLiquidBridge { *; }
+-keep class com.clearline.inference.NativeGeneration { *; }

@@ -1,0 +1,92 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(clearline_liquid LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_C_VISIBILITY_PRESET hidden)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+
+if(ANDROID AND NOT ANDROID_ABI STREQUAL "arm64-v8a")
+    message(FATAL_ERROR "ClearLine Liquid initially supports arm64-v8a only")
+endif()
+
+# Exact source and archive digest, never a branch/tag. No weights are fetched.
+include(FetchContent)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+include(${CMAKE_CURRENT_LIST_DIR}/../../../native/llama-pin.cmake)
+set(CLEARLINE_LLAMA_ARCHIVE "" CACHE FILEPATH "Previously downloaded, digest-checked pinned archive")
+if(CLEARLINE_LLAMA_ARCHIVE)
+    set(_llama_url "${CLEARLINE_LLAMA_ARCHIVE}")
+else()
+    set(_llama_url "${CLEARLINE_LLAMA_URL}")
+endif()
+
+# Static, private CPU runtime. No independently packaged libggml/libllama, no
+# dynamic backend discovery, network, model server, subprocesses or accelerators.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_APP OFF CACHE BOOL "" FORCE)
+set(LLAMA_OPENSSL OFF CACHE BOOL "" FORCE)
+set(LLAMA_SUBPROCESS OFF CACHE BOOL "" FORCE)
+set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_CPU ON CACHE BOOL "" FORCE)
+set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "" FORCE)
+set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+set(GGML_BLAS OFF CACHE BOOL "" FORCE)
+set(GGML_ACCELERATE OFF CACHE BOOL "" FORCE)
+set(GGML_METAL OFF CACHE BOOL "" FORCE)
+set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
+set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+set(GGML_RPC OFF CACHE BOOL "" FORCE)
+set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
+if(ANDROID)
+    # Conservative ISA works across S24 SoCs. Faster kernels need device tests.
+    set(GGML_CPU_ARM_ARCH "armv8-a" CACHE STRING "" FORCE)
+endif()
+FetchContent_Declare(clearline_llama
+    URL "${_llama_url}"
+    URL_HASH "SHA256=${CLEARLINE_LLAMA_SHA256}"
+)
+FetchContent_MakeAvailable(clearline_llama)
+
+add_library(clearline_liquid SHARED liquid_jni.cpp)
+target_link_libraries(clearline_liquid PRIVATE llama)
+target_compile_options(clearline_liquid PRIVATE -Wall -Wextra -Werror)
+if(ANDROID)
+    target_link_options(clearline_liquid PRIVATE
+        "-Wl,--version-script=${CMAKE_CURRENT_LIST_DIR}/exports.map"
+        "-Wl,--exclude-libs,ALL"
+        "-Wl,-z,max-page-size=16384")
+    set_property(TARGET clearline_liquid APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/exports.map")
+elseif(APPLE)
+    find_package(JNI REQUIRED)
+    target_include_directories(clearline_liquid PRIVATE ${JNI_INCLUDE_DIRS})
+    target_link_options(clearline_liquid PRIVATE "-Wl,-exported_symbols_list,${CMAKE_CURRENT_LIST_DIR}/exports.darwin")
+    set_property(TARGET clearline_liquid APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/exports.darwin")
+else()
+    find_package(JNI REQUIRED)
+    target_include_directories(clearline_liquid PRIVATE ${JNI_INCLUDE_DIRS})
+    target_link_options(clearline_liquid PRIVATE
+        "-Wl,--version-script=${CMAKE_CURRENT_LIST_DIR}/exports.map" "-Wl,--exclude-libs,ALL")
+endif()
+
+option(CLEARLINE_NATIVE_TESTS "Build native cancellation tests (no weights)" OFF)
+if(CLEARLINE_NATIVE_TESTS)
+    enable_testing()
+    find_package(Threads REQUIRED)
+    add_executable(clearline_cancel_test ../../../native/tests/cancellation_test.cpp)
+    target_include_directories(clearline_cancel_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+    target_link_libraries(clearline_cancel_test PRIVATE Threads::Threads)
+    add_test(NAME clearline_cancel_test COMMAND clearline_cancel_test)
+endif()

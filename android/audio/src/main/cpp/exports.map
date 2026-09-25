@@ -1,0 +1,4 @@
+{
+  global: Java_com_clearline_audio_NativeWhisperBridge_*;
+  local: *;
+};

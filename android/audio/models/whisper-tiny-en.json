@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "model_id": "whisper-tiny.en-f16-v1",
+  "repository": "ggerganov/whisper.cpp",
+  "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+  "filename": "ggml-tiny.en.bin",
+  "size_bytes": 77704715,
+  "sha256": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+  "model_type": "whisper-tiny.en",
+  "quantization": "F16",
+  "tokenizer_template": "whisper-english-transcribe-v1",
+  "language_scope": "English only",
+  "runtime_repository": "https://github.com/ggml-org/whisper.cpp",
+  "runtime_commit": "a8d002cfd879315632a579e73f0148d06959de36",
+  "runtime_tag": "v1.7.6",
+  "model_license": "https://github.com/openai/whisper/blob/main/LICENSE",
+  "runtime_license": "https://github.com/ggml-org/whisper.cpp/blob/a8d002cfd879315632a579e73f0148d06959de36/LICENSE",
+  "device_verified": false
+}

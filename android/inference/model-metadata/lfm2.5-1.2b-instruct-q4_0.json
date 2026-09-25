@@ -1,0 +1,76 @@
+{
+  "repository": "LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
+  "revision": "8ed288026e23958ad9dfa92d53ed773a8eee7125",
+  "filename": "LFM2.5-1.2B-Instruct-Q4_0.gguf",
+  "size_bytes": 695751488,
+  "sha256": "2ea801949d760cdf1a2cc04a54262c22c3c0c54f0769d57760c9adeb0e59233f",
+  "quantization": "Q4_0",
+  "model_type": "lfm2",
+  "metadata_observed_at": "2026-09-25",
+  "verification": "Official Hugging Face model API LFS metadata; bounded GGUF header inspected. Full weights not downloaded or evaluated.",
+  "template": {
+    "source": "GGUF tokenizer.chat_template",
+    "sha256": "f05bf4b967dc993bdc7a2fe6e43759ee218eb0eb340d68b063e1c4f8ad148176",
+    "file": "lfm2.5-q4_0-chat-template.jinja"
+  },
+  "tokenizer": {
+    "tokenizer.ggml.bos_token_id": 1,
+    "tokenizer.ggml.eos_token_id": 7,
+    "tokenizer.ggml.add_bos_token": true,
+    "tokenizer.ggml.add_eos_token": false
+  },
+  "control_tokens": {
+    "1": {
+      "text": "<|startoftext|>",
+      "type": 3
+    },
+    "2": {
+      "text": "<|endoftext|>",
+      "type": 3
+    },
+    "6": {
+      "text": "<|im_start|>",
+      "type": 3
+    },
+    "7": {
+      "text": "<|im_end|>",
+      "type": 3
+    },
+    "8": {
+      "text": "<|tool_list_start|>",
+      "type": 3
+    },
+    "9": {
+      "text": "<|tool_list_end|>",
+      "type": 3
+    },
+    "10": {
+      "text": "<|tool_call_start|>",
+      "type": 3
+    },
+    "11": {
+      "text": "<|tool_call_end|>",
+      "type": 3
+    },
+    "12": {
+      "text": "<|tool_response_start|>",
+      "type": 3
+    },
+    "13": {
+      "text": "<|tool_response_end|>",
+      "type": 3
+    }
+  },
+  "original_tokenizer_reference": {
+    "repository": "LiquidAI/LFM2.5-1.2B-Instruct",
+    "revision": "0f604ada3f766f9f257460c4c9f0b5d6f69d431b",
+    "tokenizer_config_sha256": "2a52ec012d3df831ba434b081bef3726a6ee22501f062ad8353c557a0cfa0d01",
+    "chat_template_sha256": "ba551d58630afa3190b1be3602e28301f3d2e9bbac978dfc49d6d825171648b6",
+    "warning": "The current original repository template differs from the embedded GGUF template; use the embedded template identity."
+  },
+  "language_scope": "English demonstration; no on-device language evaluation yet",
+  "license": {
+    "reference": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/blob/8ed288026e23958ad9dfa92d53ed773a8eee7125/LICENSE",
+    "sha256": "5188f2b355da20647257a3156db5834c794e5fb5e6d8dc4d4cdbb3180e75b85b"
+  }
+}

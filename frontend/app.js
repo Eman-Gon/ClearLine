@@ -358,7 +358,7 @@ async function poll() {
 }
 
 async function initialize() {
-  $('mode-description').textContent = DEMO_FIXTURE_MODE ? 'Synthetic preview · no live analysis or sponsor calls' : 'Consented demo · processing on your paired laptop';
+  $('mode-description').textContent = DEMO_FIXTURE_MODE ? 'Desktop prototype · synthetic preview · no live analysis or sponsor calls' : 'Desktop prototype · consented demo · processing on your paired laptop';
   $('fixture-controls').hidden = !DEMO_FIXTURE_MODE;
   $('privacy-fixture').hidden = !DEMO_FIXTURE_MODE;
   $('pairing-code').required = !DEMO_FIXTURE_MODE;

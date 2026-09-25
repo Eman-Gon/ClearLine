@@ -1,0 +1,14 @@
+.gradle/
+.kotlin/
+**/build/
+**/.cxx/
+**/.native/
+.tools/
+.toolchain/
+local.properties
+*.jks
+*.keystore
+*.gguf
+*.bin
+captures/
+.DS_Store

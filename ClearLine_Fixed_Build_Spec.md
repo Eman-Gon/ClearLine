@@ -1,16 +1,16 @@
 # ClearLine — True On-Device S24 Build Specification
 
-**Revision:** 3.0 · September 25, 2026
+**Revision:** 3.1 · September 25, 2026
 
 **Status:** Replacement architecture and implementation plan. Native app and S24 acceptance gates are not yet complete.
 
 **Target:** Native Android app with Liquid inference, audio processing, agent execution, and durable state on the Samsung Galaxy S24.
 
-**Supersedes:** Revision 2.1's laptop-local architecture and its three-session assignments.
+**Supersedes:** Revision 3.0's category-only research and blanket transcript-export restriction. Retains its phone-local architecture, consent boundaries, and recovery requirements; also replaces Revision 2.1's laptop-local assignments.
 
 ## 1. Product and mandatory deployment requirements
 
-ClearLine maintains consent-based voice check-ins and unfinished, user-chosen caregiver follow-ups across interruptions. The S24 records a short clip, transcribes it locally, computes descriptive measurements, and runs Liquid locally to choose validated tools. Its database saves completed steps and the next unfinished action. The user can request public-resource research through Nimble and separately approve a limited export to RawTree.
+ClearLine maintains consent-based voice check-ins and unfinished, user-chosen caregiver follow-ups across interruptions. The S24 records a short clip, transcribes it locally, computes descriptive measurements, and runs Liquid locally to choose validated tools. Its database saves completed steps and the next unfinished action. The local transcript shapes a proposed Nimble query that the user reviews before sending. Separately approved RawTree exports can include selected measurements, a short transcript snippet, and a keyword; the app makes that exported memory visible through counts, history, and a sourced baseline comparison.
 
 All of these belong on the S24:
 
@@ -26,7 +26,7 @@ A laptop may build/install the APK, transfer models during setup, inspect redact
 
 Use exactly the three selected sponsors: Liquid AI, RawTree, and Nimble. Speech recognition is a local implementation dependency, not an additional cloud service.
 
-**Product boundary:** descriptive check-ins and administrative follow-up only. No cognitive-decline prediction, dementia screening, emotion classification, diagnosis, clinical risk score, treatment advice, or emergency monitoring. Measurement differences must not automatically trigger searches or referrals.
+**Product boundary:** descriptive check-ins and administrative follow-up only. No cognitive-decline prediction, dementia screening, emotion classification, diagnosis, clinical risk score, treatment advice, or emergency monitoring. A person's stated concern may shape public-resource research; measured changes do not establish a condition or automatically trigger searches or referrals. No emotion/confidence, pause, vocabulary, or drift value may be invented to support the query or pitch.
 
 **Pitch after device acceptance:** “The agent brain runs locally on your phone. Your sensitive voice history never needs to be sent to a cloud model. ClearLine saves the next unfinished step so you can pick up where you left off.”
 
@@ -46,8 +46,8 @@ Samsung Galaxy S24 — native Android application
        |-- Embedded llama.cpp / JNI -> Liquid GGUF -> validated tool proposal
        |-- Room / SQLite -> local history, jobs, actions, checkpoints, outbox
        |
-       |-- approved public category/city -> Nimble HTTPS Search / Extract
-       `-- approved projections -> RawTree HTTPS events/history
+       |-- approved transcript-shaped query/city -> Nimble HTTPS Search / Extract
+       `-- approved measurements/snippet/keyword -> RawTree HTTPS memory views
 
 Explicit setup: download or import model artifacts before offline use.
 No runtime connection to a developer laptop.
@@ -118,15 +118,17 @@ Recording, Nimble research, and RawTree export require separate choices. Local-o
 | --- | --- | --- |
 | Phone-private storage | Audio during processing; transcript, metrics, local state and evidence | Recording consent and retention explanation |
 | Liquid inference | Compact checkpoint, permitted tools, relevant local data/public excerpts | In-process; no inference network request |
-| Nimble | Approved public category/city and selected public result URLs | User approval tied to request revision |
-| RawTree | Selected measurements and/or minimal workflow/source projections | Separate export approval, off by default |
+| Nimble | Exact approved concern/topic query, city, and selected public result URLs | User approval tied to final query and input revision |
+| RawTree | Selected measurements, optional bounded snippet/keyword, and/or minimal workflow/source projections | Separate field-level export approval, off by default |
 | Model download host | Model artifact request | Explicit setup, without voice/history |
 
 Synthetic inputs stay synthetic; actual consenting non-sensitive demonstration recordings are consented_demo. Do not mix these into personal baselines. Synthetic status does not bypass export consent.
 
-Never send audio, transcript text, personal names, private notes, full prompts/model output, credentials, or full local checkpoints to sponsors. Construct outbound objects from typed allowlists. A RawTree checkpoint projection is a limited approved record, not a backup of private agent state.
+Never send audio, full transcripts, personal names, private notes, full prompts/model output, credentials, or full local checkpoints to sponsors. The only transcript-derived outbound text is the exact approved Nimble concern query and the separately approved RawTree snippet/keyword. Construct outbound objects from typed allowlists. A RawTree checkpoint projection is a limited approved record, not a backup of private agent state.
 
-Show which fields leave the phone. Categories/cities and pseudonymous identifiers may reveal interests. Enabling export must not silently backfill prior sessions. Revocation cancels unsent projections and prevents new dispatches; it cannot recall already delivered or in-flight requests.
+Build the query and export preview locally after ASR. Show the complete outgoing query; use a generalized concern phrase instead of copying arbitrary sentences, contact details, or names. Show the exact optional RawTree snippet (at most 200 characters) and keyword (at most 40 characters) before approval, and allow editing or omission. Text export is not implied by measurement export or by Nimble approval. Store approved values with their session/input revision; changes require fresh approval of the changed outbound content. Do not rely on automatic redaction as proof that text contains no sensitive information.
+
+Show which fields leave the phone. Queries, snippets, keywords, cities, and pseudonymous identifiers may reveal personal concerns. Enabling export must not silently backfill prior sessions. Revocation cancels unsent projections and prevents new dispatches; it cannot recall already delivered or in-flight requests. Previously exported history may therefore be incomplete or retain older approved versions; present its coverage honestly.
 
 Use app-private storage and exclude sensitive files, DB/WAL files, model files, and credential ciphertext from cloud backup and device transfer. Set manifest policy plus applicable explicit backup/data-extraction rules; verify on the S24. allowBackup=false alone is not proof that every transfer path is excluded. [Android backup rules](https://developer.android.com/identity/data/autobackup).
 
@@ -148,9 +150,10 @@ After model setup, the app's external traffic is limited to explicitly approved 
 
 1. **Setup:** actual model installation/loading, local transcription readiness, optional sponsor settings, and data explanation.
 2. **Home/history:** local profile, check-ins, open follow-ups, model readiness, and next unfinished step. Earlier sessions/results remain reopenable after starting a new check-in.
-3. **Check-in:** consent, microphone permission, record/stop, elapsed duration, local level meter, interruption and processing status.
-4. **Summary:** descriptive metrics, local baseline provenance/count, null/unavailable fields, optional transcript correction, and “No health interpretation is provided.”
-5. **Follow-up:** category/city approval, source cards/descriptions, retrieval time, unknown fields, pause/resume, and completed/pending action timeline.
+3. **Check-in:** consent, microphone permission, record/stop, elapsed duration, local level meter, interruption and processing status. Show the last confirmed RawTree count and pending export status when available, with retrieval time and count scope.
+4. **Summary:** descriptive metrics, local baseline provenance/count, null/unavailable fields, optional transcript correction, and “No health interpretation is provided.” Offer the separately labeled RawTree baseline/current table and session memory timeline when approved history has been read.
+5. **Follow-up:** editable transcript-shaped query/city preview and exact-query approval, “Nimble searched” text, a factual “Based on” explanation, up to three source cards/descriptions, retrieval time, unknown fields, pause/resume, and completed/pending action timeline.
+6. **Developer diagnostics:** read-only last sponsor operation metadata, sanitized RawTree query/template and bounds, rows returned, baseline eligibility/count, measured latency, retrieval time, cache/live status, and errors. This is a native screen, not a new backend route.
 
 UI rendering, Flow collection, recomposition, and history reads must not create jobs or call tools. Debug fixtures are visibly labeled and isolated from real execution.
 
@@ -161,6 +164,8 @@ Use native AudioRecord with RECORD_AUDIO permission and private PCM/WAV files. T
 Choose supported capture settings and produce validated mono 16 kHz PCM for ASR. If another capture rate is needed, explicitly resample and version the method; never just relabel it. Finalize a .part file and atomically promote it before issuing a durable complete-clip receipt. Partial recordings are not accepted input.
 
 Keep stable session_id/clip_id, checksum, format, duration, provenance, and method version. Repeated admission of identical content returns the same receipt; reused IDs with different bytes are rejected. Replacement supersedes an earlier clip only after acceptance.
+
+**Chunk limitation:** the MVP capture path finalizes a complete clip before transcription and export. It does not currently establish a durable ten-second chunk stream. Update memory after a committed summary/export acknowledgement and a successful history refresh; do not animate a growing RawTree count during recording or claim a `/session/chunk` response. An opt-in ten-second local-segment extension requires separately finalized segment IDs/checksums, exactly-once local admission, per-segment processing/export state, and interruption/deduplication tests before those live ticks can be demonstrated. Segments must not inflate the number of completed sessions.
 
 Handle denied/revoked permission, missing microphone, capture failure, silence, empty/truncated input, timeout, storage exhaustion, backgrounding, and process death. Release the microphone on stop/interruption. Killed in-progress recording may need replacement. [Android recording guidance](https://developer.android.com/media/platform/mediarecorder).
 
@@ -193,11 +198,23 @@ Preserve these meanings; example values below are not expected demo results:
 
 Compute duration/normalized RMS from actual PCM, word count from local transcription, and recording_wpm from words divided by full recording duration. Define/version lexical counting. Pitch/pauses remain null in this MVP. Reject unusable/silent/no-speech input; ASR text alone is not proof of speech.
 
+Emotion labels/confidence, vocabulary complexity, and a drift score are not implemented measurements in this revision. Display these as unavailable or omit them. Do not convert missing fields to zero, label RMS as a normalized emotion/energy score, or present recording WPM as articulation rate. Differences describe this recording; they do not diagnose cognitive decline.
+
 Produce one versioned summary per completed session from accepted non-superseded clips. Pool words/duration for WPM; calculate pooled RMS from duration-weighted squared RMS. Transcript corrections update word-derived quantities and dependent summaries/comparisons while retaining acoustic measurements.
 
-**Room is the baseline authority.** Select the latest versions of the last five eligible completed prior sessions, excluding current, matching profile/task/method/provenance. Require two prior sessions for this prototype's comparison; otherwise return insufficient_history. Show values, mean, and delta. Zero variance means no standardized difference, never a risk score.
+**Room is the local baseline and recovery authority.** Select the latest versions of the last five eligible completed prior sessions, excluding current, matching profile/task/method/provenance. Require two prior sessions for this prototype's comparison; otherwise return insufficient_history. Show values, mean, and delta. Zero variance means no standardized difference, never a risk score.
 
 Export off, missing keys, and airplane mode must not prevent local history, comparison, or resume. Synthetic history is never a real speaker's established baseline.
+
+### Visible RawTree memory
+
+RawTree supplies a separate view of the history actually exported to it. Its comparison must be computed from returned eligible rows and labeled `From RawTree (N prior sessions)`; never relabel a Room comparison as a RawTree result. Query the preceding 56 days with bounded pagination/row limits, retain actual coverage and truncation information, deduplicate logical records, select the latest eligible revision, and exclude the current session from the baseline. Use matching profile/task/method/provenance and at least two prior eligible sessions. Report the number/date range actually used, rather than assuming eight weeks or eight sessions exist.
+
+Show baseline and current values side by side for supported fields such as recording WPM and RMS, with units and descriptive deltas. Percent change is unavailable when the baseline is zero; omit unsupported rows or show “Not measured.” Identify the current session as its local accepted summary until its cloud export is confirmed. A cached RawTree snapshot keeps its original retrieval time and cache label. Missing network/keys, incomplete history, and insufficient baseline history remain visible.
+
+The memory counter reports confirmed distinct records/data points and distinct sessions within its stated query scope. Define a data point as a persisted logical summary (or, only after segment support exists, a separately identified segment); multiple fields in one row are not multiple points. Pending/acknowledged exports and query-confirmed totals are separate states. A replayed event, corrected revision, or repeated read must not increase the logical count. When a bounded query is incomplete, label counts as loaded rows/known coverage rather than a total.
+
+The timeline shows each eligible session's actual date, measured recording WPM, and approved snippet/keyword when available. It identifies the current session and the RawTree source. Do not substitute invented emotion labels or text for absent exported fields. A local-only timeline remains separately labeled.
 
 ### Persistence
 
@@ -213,12 +230,12 @@ Liquid proposes a tool. Deterministic Kotlin validates identity, consent, argume
 | --- | --- |
 | get_baseline_summary | Local Room history |
 | compare_recording_metrics | Local deterministic descriptive comparison |
-| search_public_resources | Nimble request matching approved category/city exactly |
+| search_public_resources | Nimble request matching the exact approved transcript-shaped query, city, and revision |
 | extract_public_page | Nimble extraction of a result from that approved search |
 | request_user_input | Persist a bounded relevant missing-input request |
 | finish_task | Complete only with required comparisons/evidence and satisfied constraints |
 
-RawTree export is consent-controlled outbox work, not a model tool that can grant permission. An optional “View exported history” screen uses bounded reads without replacing local recovery.
+RawTree export is consent-controlled outbox work, not a model tool that can grant permission. Explicit memory refresh and post-delivery refresh use bounded scheduled reads and return persisted snapshots for the UI. Observation never dispatches those reads. Cloud history does not replace local recovery.
 
 Allow one proposed action at a time and initially 12 actions per workflow revision. Bound model/HTTP retries; exhausted budgets remain visibly unfinished. Never fabricate facts after failure.
 
@@ -234,7 +251,7 @@ awaiting_input, waiting_network, waiting_retry, paused, agent_unavailable
 
 Model readiness is separate component state. Stored clips can wait for missing models. ready means the current task is complete, not that a person is medically safe.
 
-City/category edits create a research revision and invalidate its dependent search/extract work. Transcript corrections version measurements and invalidate dependent comparisons. Reject stale revisions. Obsolete in-flight results cannot update current state or enqueue exports. Keep accepted clip identity intact.
+City, category, concern, or final query edits create a research revision and invalidate its dependent approval/search/extract work. Transcript corrections version word-derived measurements, comparisons, query proposals, and text export previews; any changed outbound text needs fresh approval. A changed metric used in the rationale also invalidates that proposal's revision. Reject stale revisions. Obsolete in-flight results cannot update current state or enqueue exports. Keep accepted clip identity intact; immutable committed results remain associated with their original revision.
 
 Store full action results locally and compact references in checkpoints.
 
@@ -259,7 +276,7 @@ Foreground work resumes after manual reopen. Optional WorkManager retries approv
 
 ### Compact context
 
-Use current goal/scope, unresolved requirements, revision, measurements, local summary references, recent action/results, and short relevant public passages. Do not append the entire history or raw audio.
+Use current goal/scope, unresolved requirements, revision, measurements, the locally derived concern and query approval, local summary references, recent action/results, and short relevant public passages. Do not append the entire history or raw audio. Transcript text and sponsor evidence are data, not instructions that can grant consent or select credentials.
 
 Start with at most 3072 rendered input tokens and 768 output tokens within 4096, leaving headroom. These are project budgets to measure. Include templates/tools/role messages in counts. Trim optional passages first; if required state cannot fit, return context_capacity_exceeded instead of forgetting obligations.
 
@@ -336,7 +353,9 @@ WorkflowStore must expose atomic command application, job claim, plan persistenc
 
 Profile deletion first cancels its execution and transactionally invalidates all associated jobs/actions/outbox entries while deleting local records; clean associated files with restart-safe cleanup. Late results must not recreate deleted state. This does not imply deletion of previously delivered cloud records.
 
-SessionSnapshot includes IDs, phase, state/input versions, execution_mode, metrics, comparison, sources/resources, pending action/input, errors, provenance, consent, and cloud-sync counts. Distinguish real_on_device from synthetic_fixture; configuration is not verified model readiness.
+SessionSnapshot includes IDs, phase, state/input versions, execution_mode, metrics, comparison, sources/resources, pending action/input, errors, provenance, consent, and cloud-sync counts. Add a versioned proposed/approved query with concern, rationale, city, and source transcript revision; optional approved export text; and a RawTree memory snapshot with count scope, coverage, distinct counts, eligible history/baseline, retrieval time, cache status, and typed errors. Distinguish real_on_device from synthetic_fixture; configuration is not verified model readiness.
+
+ApprovedResourceRequest must carry the final query rather than reconstructing it from a category at dispatch. ApprovedExport must distinguish measurement consent from optional snippet/keyword consent and retain the exact approved values. BoundedHistoryQuery/HistoryResult must carry profile/provenance/method filters, window/limits, truncation, logical record identities, and version information. Freeze concrete DTO names and bounds through Session 1's shared contracts; adapters must not silently discard these fields.
 
 SourceEvidence includes title, nullable description, source URL, retrieval time, content hash, evidence/version identity, supporting passages, nullable facts, and verification status. Preserve description into the UI. “Source backed” does not establish service availability.
 
@@ -358,17 +377,25 @@ Use native HTTPS clients with bounded request/response sizes, timeouts, cancella
 
 ### Nimble
 
-Call Search from the phone only for the approved public request:
+Build a targeted query locally after Whisper completes, then call Search from the phone only for the approved exact request. The existing Python sketch is behavior guidance; implementation is phone-local Kotlin, not a FastAPI service.
+
+1. Inspect the actual transcript for a bounded, relevant stated concern such as forgetting belongings, difficulty finding words, loneliness, or caregiver support. Preserve the distinction between a stated concern and an inferred diagnosis; negated statements must not become affirmative concern evidence.
+2. Convert that concern into a public-resource phrase. For example, “I keep forgetting where I put things” can propose `support for forgetting everyday items near San Francisco CA` when that city has been selected. Different stated concerns must produce different queries even with the same city. Do not claim transcript personalization when the builder used only a category fallback.
+3. Attach only available descriptive evidence to the local rationale: the selected concern and a measured comparison, if one exists. Changes in recording WPM/RMS may provide context but cannot imply dementia, anxiety, or another condition. Emotion/pause/vocabulary branches remain unavailable until separately implemented and evaluated; they must not replace transcript use.
+4. When no supported concern is found, produce an explicitly labeled category-based fallback for user review. Empty/invalid transcripts must not manufacture evidence. Let the user edit the concern/query and city, then approve the exact final string and revision before dispatch.
+5. Persist the query, builder version, concern/rationale, input revision, and approval locally. Send only the approved query and allowed search parameters. Do not send the rationale, source transcript, baseline rows, or emotion fields as additional request context.
 
 ~~~http
 POST https://sdk.nimbleway.com/v2/search
 Authorization: Bearer <Nimble credential>
 Content-Type: application/json
 
-{"query":"caregiver support groups in <approved city>","country":"US","max_results":3,"full_content":false}
+{"query":"support for forgetting everyday items near San Francisco CA","country":"US","max_results":3,"full_content":false}
 ~~~
 
-Preserve result title, URL, description, and request_id. Categories caregiver_support, respite_care, and caregiver_education map to fixed public phrases. Do not generate searches from private transcript contents. [Nimble Search](https://docs.nimbleway.com/api-reference/search/search).
+The sample query is illustrative, not a hardcoded city or required search term. Preserve the dispatched query, result title, URL, description, and request_id. Categories caregiver_support, respite_care, and caregiver_education remain useful fallback phrases, but do not override a reviewed transcript-derived concern. Use the current documented Search v2 endpoint above; do not copy the older `api.webit.live` example or its different field names without a verified account/API requirement. [Nimble Search](https://docs.nimbleway.com/api-reference/search/search).
+
+The follow-up screen shows `Nimble searched: “<actual dispatched query>”`, a local `Based on` explanation, and up to three returned results beneath it. Quote the actual selected concern or show a supported metric delta with its source/count; never display the sample “pauses increased 133% · sad (83%)” unless those measurements exist. Before dispatch label the string as proposed/approved, not searched; after a failed request show the failure instead of implying results arrived.
 
 ~~~http
 POST https://sdk.nimbleway.com/v2/extract
@@ -386,7 +413,7 @@ Every displayed fact needs a supporting passage reference. Missing phone/address
 
 ### RawTree
 
-RawTree stores only selected exported data. Room remains authoritative for baselines, queue claims, actions, checkpoints, and recovery.
+RawTree stores only selected exported data and supplies the visible cloud memory view. Room remains authoritative for the local baseline, queue claims, actions, checkpoints, and recovery. RawTree comparisons use RawTree-returned rows and carry their own source, coverage, and retrieval metadata.
 
 Port the existing adapter's REST contract:
 
@@ -413,15 +440,21 @@ RawTree's official introduction confirms ingestion/query endpoint forms. Detaile
 Allowlisted tables and maximum permitted projections:
 
 - clearline_events: stable export/event ID, pseudonymous session reference, enum event/status, revision, timestamp, provenance.
-- clearline_session_summaries: separately selected descriptive metrics and method/version fields.
+- clearline_session_summaries: stable logical summary/export identity, pseudonymous profile/session references, input/summary revision, timestamp, provenance, separately selected descriptive metrics and method/version fields; optional separately approved transcript_snippet (at most 200 characters) and top_keyword (at most 40 characters).
 - clearline_checkpoints: selected phase/completed/pending counts and references; no goals, prompts, transcripts, private input, or full checkpoint.
 - clearline_resource_versions: approved public facts, evidence identity, URL, retrieval time, and supporting public passages.
 
 Validate immutable ApprovedExport values at enqueue and dispatch, including current consent/revision. Never expose arbitrary SQL to Liquid. A database selector does not establish per-user authorization or narrow credential scope.
 
+Extract a candidate snippet and keyword from the actual accepted transcript locally and show them in the export preview. A snippet can begin with the first 200 characters, but users must be able to omit or edit it before approval. Keep absent fields absent/null; do not populate emotion_label or drift_score from fixtures or use `0.0` to mean an uncomputed score. Later corrections create explicit approved revisions with stable logical identity, not silent changes to already sent content.
+
 The local outbox owns IDs/delivery state. Cloud ingestion is not a queue lease, uniqueness guarantee, compare-and-swap, or exactly-once primitive. Deduplicate repeated event IDs and select latest eligible versions in bounded queries. Cloud records must not overwrite local checkpoints or be counted twice in local history.
 
-**Live gates:** from the S24, explicitly approve a synthetic event write, query that exact ID from the intended database, and complete Nimble Search plus Extract. Missing keys/network are unavailability. Synthetic smoke-test exports still require approval.
+Implement fixed, bounded history/count/baseline query templates. Scope by pseudonymous profile and eligible provenance/method, select the latest summary revisions, exclude current from the prior-session baseline, and preserve coverage/truncation. After a successful delivery acknowledgement, schedule a history refresh through the coordinator; only returned rows justify a query-confirmed count or timeline. Eventual visibility must show pending confirmation rather than a fabricated increment. Corrections and replayed IDs must not add a new logical session or point.
+
+Expose read-only native diagnostics for the last RawTree request: template name or sanitized SQL, redacted/bounded filters, returned row count, deduplicated eligible session count, measured latency, selected baseline values, retrieval time, and typed failure/cache state. A local diagnostics screen may be named `RawTree debug`; there is no `/debug/rawtree` HTTP server in the Android path. Use the SQL contract shown above after validating it against the account; do not label a fabricated Tinybird pipe query as an executed RawTree request. Keep keys and unapproved transcript text out of diagnostics/logs.
+
+**Live gates:** from the S24, explicitly approve a synthetic event write, query that exact ID from the intended database, and complete Nimble Search plus Extract using an approved transcript-shaped query. Verify optional text-field export with a synthetic canary and approved exact values; then verify history/count/baseline output against known distinct revisions and show the real query diagnostics. Missing keys/network are unavailability. Synthetic smoke-test exports still require approval.
 
 ## 9. Three Codex implementation sessions
 
@@ -436,6 +469,8 @@ All sessions must read this revision fully. These commands replace the previous 
 > Own android/app/, android/core/, android/storage/, android/audio/, root Android Gradle/version configuration, manifest, and associated tests. Create the shared module/contracts bootstrap first and coordinate it with Sessions 2 and 3.
 >
 > Implement real AudioRecord and embedded whisper.cpp on the phone, complete-file admission, measurements, provenance, local profiles/history, reopenable prior follow-ups, consent/deletion, backup exclusions, and transactional WorkflowStore.
+>
+> Add exact-query review, a factual query rationale, three returned result cards, separate snippet/keyword export previews, and read-only RawTree memory views: confirmed/pending counts, sourced baseline/current values, session timeline, and native diagnostics. Persist revisioned query approvals and memory snapshots through shared contracts. Show unavailable fields and actual coverage; do not invent emotion, drift, pitch, or pause values. The current complete-clip path must not claim live ten-second recording increments.
 >
 > Build model install/load controls against Session 2's ModelRuntime and sponsor settings against Session 3's credential interface. Do not implement laptop hosting, a FastAPI-dependent browser wrapper, Liquid HTTP inference, or sponsor calls in UI code.
 >
@@ -457,9 +492,11 @@ All sessions must read this revision fully. These commands replace the previous 
 >
 > Implement CheckInCommands, local-baseline tools, state machine, validation, bounded context, revision invalidation, serialized coordinator, recovery, pause/resume, and consent-controlled outbox scheduling.
 >
-> Private state stays on the phone. Sponsor work uses Session 3's typed ports. Preserve action identities and model/tool exchanges across process death. UI observation never executes work.
+> Use the phone-local transcript query builder to derive a stated concern and approved final query; preserve its actual transcript revision and fallback status. Validate the exact query at dispatch. Corrections invalidate dependent comparison/query approval/research/export previews and reject stale in-flight results. Schedule bounded RawTree memory refreshes on explicit request or acknowledged export; deduplicate history and keep its provenance separate from the local comparison.
 >
-> Test storage transaction boundaries, bad tool output, local no/zero-variance history, oversized context, offline behavior, cancellation, repeated resume, and true process death. Report actual runtime/model/device, measured results, and blockers. No cloud/scripted-planner substitution.
+> Private state stays on the phone except exact approved sponsor projections. Sponsor work uses Session 3's typed ports. Preserve action identities and model/tool exchanges across process death. UI observation never executes work.
+>
+> Test storage transaction boundaries, bad tool output, distinct transcript concerns with identical city/metrics, negation/no-concern fallback, exact-query consent, correction invalidation, independent text-export consent, replayed RawTree revisions, local no/zero-variance history, oversized context, offline behavior, cancellation, repeated resume, and true process death. Report actual runtime/model/device, measured results, and blockers. No cloud/scripted-planner substitution.
 
 **Deliverable:** real in-process Liquid agent with validated tools and recovery from local state.
 
@@ -471,13 +508,13 @@ All sessions must read this revision fully. These commands replace the previous 
 >
 > Use direct native phone requests with owner-provided private-demo keys. No secrets in APK/source, prompts, logs, or checkpoints. No Liquid endpoint/key.
 >
-> Nimble receives only approved public category/city and selected result URLs. Preserve descriptions, citations, timestamps, hashes, and unknown fields. Treat pages as untrusted evidence.
+> Nimble receives the exact approved transcript-shaped query/city and selected result URLs through the documented v2 Search/Extract contract. Preserve the dispatched query, descriptions, citations, timestamps, hashes, and unknown fields. Do not rebuild a category-only query or send the full transcript/rationale. Treat pages as untrusted evidence.
 >
-> Recheck RawTree's account/API contract and live responses. Require export approval for all data origins, including synthetic. RawTree stays optional for local history/comparison/recovery.
+> Recheck RawTree's account/API contract and live responses. Require export approval for all data origins, including synthetic, and separate exact-value consent for optional snippet/keyword fields. Implement bounded deduplicated memory/count/baseline queries, provenance/coverage, and sanitized query/latency diagnostics. Distinguish delivery acknowledgements from query-confirmed counts; do not invent Tinybird pipe endpoints. RawTree stays optional for local history/comparison/recovery.
 >
 > Do not mutate Room, create another queue, grant consent, or implement the planner. Return typed results/errors; Session 2 schedules retries/outbox.
 >
-> Run approved live probes on the S24. Coordinate: commit Search, stop the app process, manually reopen/resume, and execute unfinished Extract without recapturing audio or rerunning committed Search.
+> Run approved live probes on the S24, including transcript-shaped Search, optional synthetic snippet/keyword write/readback, count/revision deduplication, and the returned RawTree baseline/history. Coordinate: commit Search, stop the app process, manually reopen/resume, and execute unfinished Extract without recapturing audio or rerunning committed Search. Confirm that corrections/revocation block stale dispatches and no observation causes network work.
 >
 > Report changed files, real calls, data-flow verification, unknown fields, recovery results, and blockers. Mocks and desktop calls do not prove phone execution.
 
@@ -488,7 +525,7 @@ All sessions must read this revision fully. These commands replace the previous 
 - Inspect before editing; preserve other sessions' working changes.
 - Keep ownership boundaries; route shared contract/root-build changes through Session 1.
 - Keep fixture/readiness labels honest. APK compilation is not an inference test.
-- No clinical claims, fabricated facts, hidden remote inference, or private-data export.
+- No clinical claims, fabricated facts, hidden remote inference, or unapproved private-data export. Only the exact approved query and separately approved bounded snippet/keyword may carry transcript-derived content to sponsors.
 - Prioritize real native tool calling, local ASR, and recovery before polish.
 - No unrelated integrations, email, bookings, payments, or automatic clinical referrals.
 - Record actual native acceptance results under android/docs/, including failures; never replace a failed hardware gate with a mocked pass.
@@ -508,17 +545,22 @@ Every Android gate starts as **NOT RUN** for this revision. Legacy desktop tests
 | Device/model limits | Measured load/turn time, tokens, memory, repeated runs, ASR/LFM coexistence, low storage, cancellation/unload. |
 | Local history | Eligible history works with export off; no/zero-variance cases; provenance separation; older follow-ups reopen. |
 | Observation/deduplication | Recomposition/Flow reads do not run tools; duplicate admission and repeated Resume preserve identities. |
-| Corrections | City edits invalidate research; transcript edits invalidate dependent metrics/comparison; stale in-flight results are rejected. |
-| Nimble | Approved real phone Search/Extract; descriptions/citations reach UI; unknowns stay unknown. |
-| RawTree | Approved phone write/readback to intended DB; replay deduplication; denied/revoked export stays blocked. |
+| Corrections | City/concern/query edits invalidate research approval; transcript edits invalidate dependent word metrics/comparison/query/export text; stale in-flight results are rejected; changed outgoing values require fresh consent. |
+| Transcript-shaped query | Same city/metrics plus different supported transcript concerns produce different queries; negation, empty text, irrelevant text, and explicit fallback preserve honest rationale; exact approved query reaches the request. |
+| Nimble | Approved real phone Search/Extract on v2 endpoints; actual dispatched query, rationale, and up to three descriptions/citations reach UI; unknowns stay unknown; unapproved/stale query cannot dispatch. |
+| RawTree | Approved phone write/readback to intended DB; optional snippet/keyword matches separately approved bounded values; denied/revoked export stays blocked. |
+| RawTree memory | Known repeated IDs and corrected revisions yield stable distinct counts; latest eligible prior rows drive the sourced table/timeline; current session excluded; no/zero-baseline and incomplete/cached coverage are honest. |
+| Sponsor visibility | Native diagnostics show the actual sanitized query/template, returned rows, eligibility, and measured latency; confirmed count changes require returned cloud data; complete-clip recording does not simulate ten-second increments. |
 | Process death | Search commits before Extract; kill app, reopen/resume same session; accepted clip and completed Search IDs unchanged; then Extract. |
 | Unknown interrupted work | Kill during uncommitted work; retain logical identity and safely retry a read without exactly-once claims. |
 | Android lifecycle | Separate Activity recreation, backgrounding, process kill, force-stop/manual reopen; no onDestroy dependency. |
-| Privacy | Synthetic-canary network/log inspection: no audio/transcript/private context egress or inference HTTP; backup exclusions, credential protection, deletion/outbox cancellation. |
+| Privacy | Synthetic-canary network/log inspection: only exact approved query and optional bounded snippet/keyword leave in their allowed fields; no raw audio/full transcript/private context or inference HTTP; text-consent denial/revocation, backup exclusions, credentials, deletion/outbox cancellation verified. |
 | Context/evidence | Long history does not grow prompts unboundedly; page instructions cannot alter consent/tools; facts retain source version/passages. |
 | Failures/honesty | Offline external work waits visibly; 401/429/timeouts/bad JSON/missing keys fail honestly; fixtures/cached/live output remain distinct. |
 
 For baseline demos, collect at least two eligible prior phone check-ins or show a separate labeled synthetic profile. Do not use synthetic history as the live speaker's baseline.
+
+For the RawTree view, export and query eligible prior sessions with consent. Show the actual span/count if eight weeks have not been collected. Verify baseline numbers against the returned rows and show retrieval time; no baked-in baseline or fixture row may be labeled live RawTree memory.
 
 The interruption demo must preserve the phone DB. Reinstalling with data deletion is not recovery. A developer cable may send a test kill command, but processing stays on the phone; separately demonstrate cable-disconnected use.
 
@@ -528,17 +570,19 @@ Prepare models and complete gates beforehand. Use measured device timings to det
 
 **0:00–0:25 — Story and architecture.** “A check-in is only the beginning. The follow-up needs to survive the interruption.” Show the S24's loaded model identity.
 
-**0:25–1:00 — Offline core.** With network off, record a consenting clip, transcribe on the phone, and show a real local tool action/saved summary. Measurements are descriptive only.
+**0:25–1:00 — Offline core.** With network off, record a consenting clip, transcribe on the phone, and show a real local tool action/saved summary and locally proposed concern query. Measurements are descriptive only. A RawTree view shown offline is labeled cached with its retrieval time.
 
-**1:00–1:30 — Chosen external work.** Enable connectivity, approve category/city, and show the local model choosing Nimble Search. Separately approve a minimal RawTree export if demonstrating cloud events.
+**1:00–1:30 — Chosen external work.** Enable connectivity, show the transcript-shaped query and rationale, approve its exact text/city, and show the local model choosing Nimble Search. Separately approve selected RawTree measurements and optional snippet/keyword. After acknowledged delivery and refresh, show the returned memory count.
 
 **1:30–2:15 — Interruption.** After Search commits and before Extract, stop the app process. Reopen, tap Resume, and show unchanged accepted clip/completed Search with pending Extract.
 
-**2:15–2:45 — Evidence.** Show source-backed facts, description, retrieval time, and unknown fields. Voice/transcript stays local.
+**2:15–2:45 — Evidence and memory.** Show the actual Nimble query and up to three returned results. Show RawTree's returned baseline/current table and history snippets with actual session count/span, retrieval time, and missing fields. Raw audio/full transcripts remain local; identify the small approved text projections that were sent. Open native query diagnostics when useful.
 
 **2:45–3:00 — Close.** “The agent brain runs locally on your phone. Your sensitive voice history never needs to be sent to a cloud model. When life interrupts, ClearLine keeps the next step ready.”
 
-Longer pitch: “ClearLine helps families carry a check-in through to a useful next step. A short recording is processed on the phone, where a Liquid agent maintains the relevant history and unfinished work. When you ask for outside support, it searches public sources and keeps the evidence. When you pause or the app stops, it resumes from a local checkpoint. You choose what, if anything, is exported.”
+Longer pitch: “ClearLine helps families carry a check-in through to a useful next step. A short recording is processed on the phone, where a Liquid agent maintains the relevant history and unfinished work. What was said in this call shapes the resource search you approve. RawTree makes the history you chose to export visible: prior sessions, approved snippets, and the measurements behind its comparison. When you pause or the app stops, ClearLine resumes from a local checkpoint. You choose what, if anything, is exported.”
+
+Do not claim that removing RawTree eliminates all comparisons or recovery: the local core works offline. Do not claim a clinical drift score or eight weeks of real memory until those capabilities/data exist. The defensible demo claim is that the displayed RawTree comparison comes from queried exported history, and the displayed Nimble query is shaped by this call's stated concern.
 
 ## 12. Native configuration and status
 
@@ -548,6 +592,6 @@ Record application ID, supported SDK range, tested target SDK/device OS, ABI, Gr
 
 Model manifests contain repository, immutable revision, filename, size/digest, model type, quantization, template/tokenizer identity, language scope, and license reference. Download/import is a setup step; offline readiness requires every artifact to verify.
 
-Settings include local model selection, optional sponsor enablement/credentials, RawTree database, and per-session export choices. Sponsor endpoints are allowlisted; credentials stay in the vault. Never copy .env into Android assets or BuildConfig.
+Settings include local model selection, optional sponsor enablement/credentials, RawTree database, approved research city, and per-session measurement/snippet/keyword export choices. Review exact outgoing query/text values in the session, not only a global settings toggle. Sponsor endpoints are allowlisted; credentials stay in the vault. Never copy .env into Android assets or BuildConfig.
 
 After gates pass, write android/docs/ACCEPTANCE.md with actual evidence and measured limitations. Until then, this is a native implementation in progress. Rewriting this specification neither installs Liquid nor completes the Android migration.

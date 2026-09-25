@@ -1,4 +1,6 @@
-# ClearLine — Session 1 handoff
+# ClearLine — Legacy desktop prototype
+
+Revision 3.0 moves the application to native Android under `android/`. This web preview is preserved as a desktop prototype and is not the S24 runtime. The instructions below describe the earlier revision 2.1 implementation only.
 
 Phone-first HTML/CSS/JavaScript interface for the corrected build specification, revision 2.1. All Session 1 changes are contained in `frontend/`. Backend and sponsor implementations belong to Sessions 2 and 3.
 

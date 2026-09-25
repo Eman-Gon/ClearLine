@@ -1,0 +1,4 @@
+CLEARLINE_LIQUID {
+  global: Java_com_clearline_inference_NativeLiquidBridge_*;
+  local: *;
+};
