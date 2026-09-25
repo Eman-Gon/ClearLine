@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f4ef">
+  <meta name="description" content="A consent-based voice check-in and a place to keep unfinished follow-ups. Demo prototype.">
+  <title>ClearLine · A moment to check in</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%232c5145'/%3E%3Cpath d='M10 21h4l3-9 6 17 3-8h4' fill='none' stroke='%23fff' stroke-width='2.5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="app-shell">
+    <header class="app-header">
+      <a class="brand" href="#home" aria-label="ClearLine home"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M5 17h5l3-9 6 17 3-8h5"/></svg></span>ClearLine<span class="brand-tag">a moment of connection</span></a>
+      <span class="connection-pill" id="connection"><span class="status-dot"></span>Checking connection</span>
+    </header>
+    <div class="demo-banner" id="demo-banner"><span class="tiny-label">DEMO PROTOTYPE</span><span id="mode-description">Loading connection mode…</span><button class="text-button" id="about-button" type="button">How your data moves <span aria-hidden="true">↗</span></button></div>
+    <nav class="main-nav" aria-label="Main navigation">
+      <a href="#home" data-screen="home" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10H3Z M9 20v-7h6v7"/></svg><span>Home</span></a>
+      <a href="#checkin" data-screen="checkin"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0 M12 18v3 M8 21h8"/></svg><span>Check-in</span></a>
+      <a href="#summary" data-screen="summary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h14v18H5Z M9 8h6 M9 12h6 M9 16h3"/></svg><span>Summary</span></a>
+      <a href="#followup" data-screen="followup"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v13H9l-4 4Z M9 8h6 M9 12h4"/></svg><span>Follow-up</span></a>
+    </nav>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div id="error-notice" class="notice error" role="alert" hidden></div>
+    <main id="main" tabindex="-1">
+      <section id="screen-home" class="screen" aria-labelledby="home-heading">
+        <div class="section-heading"><div><p class="eyebrow">A LITTLE SPACE FOR YOU</p><h1 id="home-heading">A moment to check in.<br><em>A place to pick up.</em></h1><p class="lede">Your voice, a simple history, and the next step<br class="desktop-break"> waiting where you left it.</p></div><div class="connection-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="voice-seed"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span class="art-dot"></span></div></div>
+        <div class="home-grid">
+          <article class="card start-card"><span class="card-kicker"><span class="number-chip">01</span> YOUR NEXT CHECK-IN</span><h2>A small pause.<br>In your own words.</h2><p>Take 20–30 seconds to share a little about your day. There’s no right way to sound.</p><button class="button primary" id="start-checkin" type="button">Start a check-in <span aria-hidden="true">↗</span></button><span class="subtle-note">You choose when the microphone turns on.</span></article>
+          <article class="card continue-card"><span class="card-kicker"><span class="number-chip">02</span> WHERE YOU LEFT OFF</span><div id="unfinished-task"></div><button class="button secondary" id="continue-task" type="button" hidden>Continue <span aria-hidden="true">→</span></button><div class="continuity-note"><span aria-hidden="true">↳</span><p>Check-ins and follow-ups have their own pace. Come back to the next step when you’re ready.</p></div></article>
+        </div>
+        <section class="history-section" aria-labelledby="history-heading"><div class="section-row"><div><p class="eyebrow">ONE MOMENT AT A TIME</p><h2 id="history-heading">Your check-in history</h2></div><span class="chip" id="history-source">Loading</span></div><div id="history-list" class="history-list"></div></section>
+        <details class="runtime-panel"><summary><span class="status-dot"></span> Connections &amp; runtime <span class="subtle-note">View details</span></summary><div id="runtime-details" class="runtime-grid"></div><p class="small-copy">Voice processing and model inference run on the paired laptop; approved demo measurements and workflow data use RawTree.</p></details>
+      </section>
+
+      <section id="screen-checkin" class="screen" aria-labelledby="checkin-heading" hidden>
+        <div class="page-heading"><p class="eyebrow">A LITTLE TIME, IN YOUR OWN WORDS</p><h1 id="checkin-heading">How has your day been?</h1><p class="lede">Find a quiet spot. Share anything simple and non-sensitive.</p></div>
+        <div class="content-grid"><div class="card recording-card"><div class="section-row"><span class="chip" id="recorder-status">Microphone off</span><span class="small-copy">20–30 seconds</span></div><div class="recording-visual" aria-hidden="true"><div class="waveform" id="waveform"></div></div><div class="timer" id="elapsed">00:00</div><p class="recording-hint" id="recording-hint">A moment about your day is enough.</p><button class="button primary record-button" id="record-button" type="button"><span class="record-dot" aria-hidden="true"></span><span id="record-label">Start recording</span></button><p id="record-support" class="small-copy"></p><div class="fixture-controls" id="fixture-controls" hidden><span>Just exploring the interface?</span><button class="text-button" type="button" id="fixture-clip">Use a synthetic example →</button></div></div>
+          <div><form id="consent-form" class="card consent-card"><p class="eyebrow">YOUR VOICE, YOUR CHOICE</p><h2>Before you begin</h2><p>Audio goes from this device to the paired laptop for local processing.</p><label class="checkbox-row"><input id="recording-consent" type="checkbox" required><span>I consent to recording this non-sensitive demonstration check-in.<small>Recording starts only when I press the button.</small></span></label><label class="checkbox-row"><input id="export-consent" type="checkbox"><span>Allow cloud measurement export<small>Optional. Only approved measurements and workflow metadata go to RawTree. Audio and transcripts do not.</small></span></label><p class="privacy-note" id="export-note">Restricted mode · cloud export is off.</p><label class="field" id="pairing-field" hidden><span>Laptop pairing code</span><input id="pairing-code" autocomplete="off" spellcheck="false" type="password" placeholder="Code configured on your laptop"><small>Used to create this session. Never saved by this page.</small></label><p class="small-copy" id="consent-lock" hidden>These are the saved choices for this session.</p></form><p class="outside-note">This is a demo check-in, with descriptive recording measurements. No health interpretation is provided.</p></div></div>
+      </section>
+
+      <section id="screen-summary" class="screen" aria-labelledby="summary-heading" hidden>
+        <div class="page-heading"><p class="eyebrow">YOUR CHECK-IN, AT A GLANCE</p><h1 id="summary-heading">A moment, captured.</h1><p class="lede">Descriptive measurements of the recording.<br>No health interpretation is provided.</p></div>
+        <div class="card capture-progress" id="capture-progress"></div>
+        <div class="section-row metrics-heading"><h2>The recording</h2><span class="chip" id="measurement-source">No recording yet</span></div><div id="metrics-grid" class="metrics-grid"></div>
+        <article class="card baseline-card"><div class="section-row"><h2>A little context</h2><span class="chip" id="baseline-count">0 sessions</span></div><p id="baseline-description"></p><div id="comparison-values"></div><p class="small-copy">Recording setup can affect these values. Differences are descriptive, with no clinical meaning assigned.</p></article>
+        <details class="card correction-panel" id="correction-panel" hidden><summary>Correct the transcript</summary><p class="small-copy">A correction creates a new summary version and updates dependent comparisons.</p><form id="transcript-form"><label class="field"><span>Transcript on the paired laptop</span><textarea id="transcript" rows="4" maxlength="10000"></textarea></label><button class="button secondary" type="submit">Save correction</button></form></details>
+        <div class="next-step"><div><p class="eyebrow">ONLY IF IT WOULD HELP</p><h2>Keep a next step in view.</h2><p>You can choose to look for public caregiver-support resources.</p></div><a class="button secondary" href="#followup">Explore a follow-up <span aria-hidden="true">→</span></a></div>
+      </section>
+
+      <section id="screen-followup" class="screen" aria-labelledby="followup-heading" hidden>
+        <div class="page-heading"><p class="eyebrow">ONE NEXT STEP, WHEN YOU’RE READY</p><h1 id="followup-heading">A little support, nearby.</h1><p class="lede">Choose what to look for. Keep the sources and<br class="desktop-break"> unfinished steps together.</p></div>
+        <div class="content-grid"><form class="card resource-form" id="resource-form"><h2>What would be helpful?</h2><label class="field"><span>Resource category</span><select id="resource-category"><option value="caregiver_support">Caregiver support groups</option><option value="respite_care">Respite care information</option><option value="caregiver_education">Caregiver education</option></select></label><label class="field"><span>City</span><input id="resource-city" type="text" placeholder="e.g. San Francisco, CA" required maxlength="100" autocomplete="address-level2"></label><div class="search-preview"><span class="eyebrow">YOUR PUBLIC SEARCH</span><p id="search-preview">Caregiver support groups in your chosen city</p><small>This category and city will be sent to Nimble when you approve the search. It may reveal your interests.</small></div><label class="checkbox-row"><input id="search-consent" type="checkbox" required><span>I approve this category and city for a public-resource search.</span></label><button type="submit" class="button primary" id="search-button">Find resources <span aria-hidden="true">↗</span></button><p class="small-copy" id="resource-help"></p></form>
+          <div class="card task-card"><span class="card-kicker"><span class="number-chip">↳</span> YOUR FOLLOW-UP</span><h2 id="task-title">A next step starts with you.</h2><p id="task-description">Nothing is searched until you choose a category and city.</p><div id="task-meta" class="task-meta"></div><div class="button-row"><button class="button secondary" type="button" id="pause-button" hidden>Pause task</button><button class="button secondary" type="button" id="resume-button" hidden>Resume task</button></div><div class="cloud-status" id="cloud-status"></div></div></div>
+        <form id="input-form" class="card pending-input" hidden><h2>A detail is needed</h2><label class="field"><span id="input-question"></span><input id="input-answer" maxlength="500" required></label><button class="button secondary" type="submit">Send answer</button></form>
+        <section class="resource-section" aria-labelledby="sources-heading"><div class="section-row"><h2 id="sources-heading">Sources to come back to</h2><span id="resource-count" class="chip">0 sources</span></div><div id="resource-list" class="resource-list"></div></section>
+        <section class="card timeline-card" aria-labelledby="timeline-heading"><div class="section-row"><h2 id="timeline-heading">The steps so far</h2><span class="small-copy">Latest 8 events</span></div><ol class="timeline" id="timeline"></ol></section>
+      </section>
+    </main>
+    <footer class="page-footer"><span class="footer-brand">ClearLine</span><span>A check-in, with room to continue.</span><span>Demo prototype · No health interpretation</span></footer>
+  </div>
+  <dialog id="privacy-dialog" aria-labelledby="privacy-heading"><div class="dialog-heading"><p class="eyebrow">A CLEARER VIEW OF YOUR DATA</p><button class="icon-button" id="close-privacy" aria-label="Close data information" type="button">×</button></div><h2 id="privacy-heading">From your voice to a next step.</h2><ol class="data-path"><li><strong>This device → paired laptop</strong><p>Your complete recording is sent after you stop. Voice processing and model inference happen on the laptop.</p></li><li><strong>Only with separate export consent → RawTree</strong><p>Approved derived measurements and workflow metadata. Never audio, transcripts, names, secrets, or full model messages.</p></li><li><strong>Only when you request it → Nimble</strong><p>Your selected public search category and city. Resource pages are evidence, and availability may remain unknown.</p></li></ol><p class="small-copy">This page keeps only session/clip identifiers and a resume token in browser storage. Audio stays in page memory while awaiting upload; it is lost if you close or reload before acceptance. The backend removes temporary media after processing no longer needs it; this is not a promise of forensic erasure.</p><p class="privacy-note" id="privacy-fixture">Fixture mode simulates the interface. No recording or request is sent to a backend or sponsor.</p></dialog>
+</body>
+</html>
