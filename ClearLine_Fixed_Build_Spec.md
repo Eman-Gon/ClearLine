@@ -1,136 +1,182 @@
-# ClearLine — Corrected Build Specification
+# ClearLine — True On-Device S24 Build Specification
 
-**Revision:** 2.1 · September 25, 2026  
-**Status:** Documentation-checked implementation specification, not a completed application.  
-**Target:** Phone-operated, laptop-local hackathon prototype using Liquid AI + RawTree + Nimble.  
-**Supersedes:** Both supplied ClearLine drafts. Do not append this to their contradictory instructions.
+**Revision:** 3.0 · September 25, 2026
 
-## 1. Overview and explicit scope changes
+**Status:** Replacement architecture and implementation plan. Native app and S24 acceptance gates are not yet complete.
 
-ClearLine maintains consent-based voice check-ins and unfinished, user-chosen caregiver follow-ups across interruptions. A person records a short clip on a Samsung Galaxy S24. A paired laptop transcribes and measures the recording locally. Liquid AI selects validated tools to retrieve historical summaries, compare descriptive measurements, request missing input, and research public resources the user explicitly requested. RawTree holds approved demo events, session summaries, source versions, and checkpoint history. Nimble searches and extracts current public pages. A durable worker can recover after a backend process restart without treating completed work as new work.
+**Target:** Native Android app with Liquid inference, audio processing, agent execution, and durable state on the Samsung Galaxy S24.
 
-This preserves the original phone input, Python/FastAPI backend, longitudinal comparisons, three sponsors, and parallel-build structure. The following changes are deliberate, not claims that the original draft already did them:
+**Supersedes:** Revision 2.1's laptop-local architecture and its three-session assignments.
 
-- Remove claims of cognitive-decline detection, dementia screening, emotional flattening, a clinical alert threshold, and a “90-day early warning system.” The selected speech-emotion model's card describes emotion classification, not validation for those uses. [S12]
-- Remove the emotion classifier and emotion-confidence score from the MVP. Remove readability/vocabulary scores from the MVP. Keep descriptive recording measurements only.
-- Public-resource research begins with an explicit user request. A statistical difference must not automatically imply a clinical referral.
-- Remove all Black Forest Labs references. This build uses exactly the three selected sponsors.
-- Replace fragile independently decoded timeslice blobs with short, complete recordings. Streaming acoustic analysis is a later enhancement.
-- Describe the deployment as **phone-operated, with inference on a paired laptop**. This is not an Android-native model deployment.
-- Replace in-memory-only workflow state with durable checkpoints and a recoverable worker.
+## 1. Product and mandatory deployment requirements
 
-**Proposed pitch:** “A family check-in should not disappear when an app closes. ClearLine keeps a concise history of recorded check-ins and unfinished follow-ups. Its local agent checks the evidence, asks for missing information, and picks up its work after an interruption.”
+ClearLine maintains consent-based voice check-ins and unfinished, user-chosen caregiver follow-ups across interruptions. The S24 records a short clip, transcribes it locally, computes descriptive measurements, and runs Liquid locally to choose validated tools. Its database saves completed steps and the next unfinished action. The user can request public-resource research through Nimble and separately approve a limited export to RawTree.
 
-**Boundary:** This prototype does not diagnose, prescribe, identify emotional or cognitive states, recommend treatment, or provide emergency monitoring. It does not secretly record calls or prove clinical efficacy.
+All of these belong on the S24:
 
-## 2. The one deployment architecture to implement
+- Native UI and microphone capture.
+- Audio, transcription, measurements, and historical comparisons.
+- Liquid weights, inference, prompt assembly, tool-call parsing, and validation.
+- Local profiles, sessions, source evidence, action ledger, checkpoints, and export outbox.
+- Pause, process-death recovery, and explicit resume.
 
-```text
-Samsung Galaxy S24 / Chrome
-  consent + complete voice clips + explicit resource request
-                 |
-       USB-forwarded local origin
-       or trusted HTTPS on a private LAN
-                 |
-FastAPI on paired laptop (one application worker)
-  |-- local audio decoding, transcription, descriptive measurements
-  |-- SQLite: durable jobs, action ledger, checkpoints, outbox
-  |-- local Liquid llama-server: model-selected tools
-  |-- RawTree API: approved demo history + evidence + checkpoint mirror
-  |-- Nimble API: public search + page extraction
-  `-- read-only status endpoints for the phone
-```
+A laptop may build/install the APK, transfer models during setup, inspect redacted diagnostics, or mirror the screen. It must not process recordings, run the app's model, coordinate its agent, or hold the authoritative runtime database. Disconnecting it must not stop the installed app.
 
-Use the existing Python backend rather than introducing a Node service merely because one supplied link documents a Node SDK. The official Nimble Python SDK exists; direct HTTP is also documented. [S5–S7]
+**No Liquid API key. No Liquid cloud endpoint. No Ollama or localhost:11434 dependency. No phone or laptop llama-server dependency. No FastAPI backend in the Android execution path.**
 
-For the live prototype, use `llama-server` on the laptop. Liquid's docs document that server and a separate in-process Android integration. The LEAP SDK is listed as deprecated, with direct llama.cpp use recommended. [S1–S4]
+Use exactly the three selected sponsors: Liquid AI, RawTree, and Nimble. Speech recognition is a local implementation dependency, not an additional cloud service.
 
-Do not introduce Apollo as an undocumented server for ClearLine. Do not equate “a model runs in Apollo” with “our web application is connected to that model.”
+**Product boundary:** descriptive check-ins and administrative follow-up only. No cognitive-decline prediction, dementia screening, emotion classification, diagnosis, clinical risk score, treatment advice, or emergency monitoring. Measurement differences must not automatically trigger searches or referrals.
 
-### Local model selection
+**Pitch after device acceptance:** “The agent brain runs locally on your phone. Your sensitive voice history never needs to be sent to a cloud model. ClearLine saves the next unfinished step so you can pick up where you left off.”
 
-Primary candidate: `LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M`. The 2.6B model is documented for agentic workloads and tool calling. Its publisher provides a GGUF llama-server example. [S1, S2]
+Until then, use “We are building…” and distinguish implemented components from verified on-device behavior.
 
-If the actual laptop cannot run it acceptably, deliberately evaluate `LiquidAI/LFM2.5-1.2B-Instruct-GGUF:Q4_K_M`. Record the chosen model, quantization, runtime build, and measured tool-call behavior. Do not silently swap models or invent latency/accuracy measurements.
+## 2. Architecture and migration
 
-Example startup, after installing a current compatible llama.cpp build:
+~~~text
+Samsung Galaxy S24 — native Android application
+  Kotlin / Jetpack Compose UI
+       |
+  Local commands + read-only observed state
+       |
+  One serialized foreground coordinator
+       |-- AudioRecord -> finalized local PCM/WAV
+       |-- Embedded whisper.cpp -> transcript + measurements
+       |-- Embedded llama.cpp / JNI -> Liquid GGUF -> validated tool proposal
+       |-- Room / SQLite -> local history, jobs, actions, checkpoints, outbox
+       |
+       |-- approved public category/city -> Nimble HTTPS Search / Extract
+       `-- approved projections -> RawTree HTTPS events/history
 
-```bash
-llama-server \
-  -hf LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M \
-  --alias clearline-liquid \
-  --host 127.0.0.1 --port 8080 \
-  -c 4096 --jinja
-```
+Explicit setup: download or import model artifacts before offline use.
+No runtime connection to a developer laptop.
+~~~
 
-The model download needs network access initially. Subsequent local inference can run without a Liquid-hosted service. Nimble and RawTree still require network access. `--alias` is a llama-server option; the app's `LIQUID_MODEL` must match the served alias. [S2, S3, S14]
+Kotlin/Compose, Room, coroutines, JNI/NDK, and native HTTP are this project's implementation choices. Pin compatible Gradle, Android plugin, Kotlin, SDK/NDK, CMake, library versions, and native runtime commits after the bootstrap build succeeds. Do not invent a tested version set.
 
-**No sponsor-issued Liquid API key is required for this local server.** Use direct HTTP to its local chat-completions endpoint. If an SDK insists on an API key, a dummy client value is not a sponsor credential. Do not send that value to a cloud service or interpret it as authentication. Keep this unauthenticated model server bound to loopback. [S3]
+Use one application process and one serialized execution coordinator. Audio processing, model loading, and inference run off the main thread. Recording and inference are foreground-only for the MVP; interruption saves progress for explicit Resume. Continuous background inference is outside this build.
 
-## 3. Product privacy and data provenance
+### Existing code is reference material
 
-This is a demo-only prototype, not a deployed healthcare-data service.
+The repository has a web UI under frontend/ and Python/FastAPI under backend/. Changing this file does not convert that implementation into Android.
 
-Before recording, disclose the actual path: phone audio goes to the paired laptop; local audio processing and Liquid inference happen there; approved derived measurements and workflow metadata may be exported to RawTree; a public search category and user-entered city go to Nimble.
+| Existing artifact | Native migration |
+| --- | --- |
+| frontend/ | Reuse screen concepts, wording, consent behavior, and test scenarios; build native UI. |
+| backend/audio/ | Preserve metric semantics/errors; replace Python/ffmpeg/faster-whisper with phone-native capture and ASR. |
+| backend/storage/ and backend/worker/ | Port transactions, identities, corrections, and recovery to Room/Kotlin. |
+| backend/agent/ | Port context and validation; replace localhost HTTP inference with in-process JNI. |
+| backend/integrations/ | Port bounded sponsor request/response behavior to Android HTTPS. |
+| Python/Node tests | Behavioral references only; do not establish Android inference or S24 performance. |
+| .env and existing READMEs | Legacy desktop setup; never package them into the APK or follow their laptop startup path for native acceptance. |
 
-Use synthetic historical data and a consenting teammate's non-sensitive demonstration recording. Tag each record separately:
+Preserve existing directories during migration. Create the native application under android/. Label any old preview as a desktop prototype. Do not automatically migrate private recordings or cloud history.
 
-- `synthetic`: fabricated fixture, never presented as a real observation.
-- `consented_demo`: an actual consenting demonstration input.
+Native commands replace pairing codes, browser resume tokens, Origin/CORS checks, HTTP audio uploads, polling routes, and LIQUID_BASE_URL.
 
-Do not label an entire dataset synthetic if it includes a live recording. Synthetic historical averages are an illustrative demo reference, not the live speaker's established personal baseline.
+## 3. Liquid runtime and model feasibility
 
-Require explicit consent for recording and a separate choice for cloud measurement export. If export is not approved, do not upload that clip's measurements or personal checkpoint payload. Show the resulting restricted mode and do not pretend RawTree received them. Synthetic-history and public-resource demonstrations remain possible.
+Liquid currently documents embedding llama.cpp through its native C API and an Android NDK integration. Its LEAP SDK is deprecated. Use the embedded path. [Liquid mobile integration](https://docs.liquid.ai/deployment/on-device/llama-cpp/mobile), [deprecations](https://docs.liquid.ai/lfm/help/deprecations).
 
-Never export raw audio, transcripts, secrets, full free-form model messages, or a person's name to RawTree. Build outbound objects from an allowlisted schema, not from the entire internal state. Minimize identifiers and free text; pseudonymous identifiers are not proof of anonymity. A public search can itself reveal interests, so show the proposed search category and city before use.
+Start device evaluation with **LiquidAI/LFM2.5-1.2B-Instruct-GGUF, Q4_0**. The mobile guide uses this small checkpoint as an example. Evaluate Q4_K_M or LFM2.5-2.6B as an explicit alternative if tool reliability/performance warrants it. The 2.6B checkpoint targets agentic use; documentation is not proof that it meets this app's device requirements. [1.2B model](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF), [2.6B model](https://docs.liquid.ai/lfm/models/lfm25-2.6b).
 
-Use this deployment wording: **“Voice processing and model inference run on the paired laptop; approved demo measurements and workflow data use RawTree.”** Do not claim that everything stays on the phone, that the app is fully offline, or that health-data compliance has been established.
+Record the actual S24 variant, SoC, RAM, Android version, immutable model revision, filename, quantization, SHA-256, native commit/build flags, and context size. Do not assume all S24 variants have the same hardware.
 
-## 4. Component 1 — Mobile frontend
+Session 2 must implement:
 
-**Stack:** Plain HTML, CSS, and JavaScript. Keep a single same-origin FastAPI deployment. The interface may be split into static files for maintainability.
+1. An arm64-v8a in-process runtime behind Kotlin interfaces. Adapt the upstream example or own the JNI bridge; inspect the pinned APIs.
+2. Private model-file import/download with free-space checks, pinned digest verification, and atomic completion. Partial files never count as installed.
+3. Visible missing/installing/verifying/loading/ready/unloading/failed states and the actual loaded model identity.
+4. Serialized native context access, supported cancellation boundaries, and safe unload. Never free a context being used by another thread.
+5. Token counts from the loaded tokenizer over the fully rendered prompt, including tool schemas/results. Start with a measured 4096-token context budget.
+6. Actual cold-load, prefill/decode, tool-round-trip, memory, and repeated-run thermal measurements. Leave unmeasured values blank. CPU is the initial path; acceleration requires actual-device verification.
+7. Coexistence of whisper.cpp and llama.cpp in one APK without native symbol/packaging conflicts. Serialize ASR and inference; unload a model if memory requires it.
+
+Reference: [upstream Android example](https://github.com/ggml-org/llama.cpp/tree/master/examples/llama.android).
+
+### Tool calls must work without a model server
+
+The previous adapter received parsed tool calls from an HTTP server. The native bridge must now provide app-owned parsing/validation.
+
+LFM tool use includes tool definitions, a model-generated call, execution, a tool-role result, and a second model turn. JSON calls can be requested explicitly; template/control-token handling must match the checkpoint. [Liquid tool use](https://docs.liquid.ai/lfm/key-concepts/tool-use).
+
+- Preserve required chat-template and tool-call tokens. A UI text-stream API that strips control tokens is insufficient.
+- Request exactly one JSON call at a time. Parse bounded complete output; reject unknown tools/fields, invalid arguments, multiple calls, truncation, and malformed output.
+- Use a pinned template/parser or a documented strict implementation for the chosen model. Do not assume llama-server parsing helpers exist in the basic C API.
+- Never execute generated Python, JavaScript, SQL, shell, or other code. Grammar constraints do not replace consent/state validation.
+- Save the matching assistant/tool exchange and call identity in checkpoints; reconstruct it after process death without a surviving KV cache.
+- Invalid output produces a bounded retry/error and then agent_unavailable. No hidden cloud fallback or scripted planner labeled Liquid.
+
+**First hardware gate:** with models installed and network disabled on the S24, ask Liquid to call echo_nonce. Generate the nonce only after validating the call, execute locally, return a tool result, and verify a second inference uses it. Then exercise actual permitted-tool selection cases. A chat response alone does not pass.
+
+## 4. Local data, consent, and credentials
+
+Recording, Nimble research, and RawTree export require separate choices. Local-only storage is the default.
+
+| Destination | Permitted data | Gate |
+| --- | --- | --- |
+| Phone-private storage | Audio during processing; transcript, metrics, local state and evidence | Recording consent and retention explanation |
+| Liquid inference | Compact checkpoint, permitted tools, relevant local data/public excerpts | In-process; no inference network request |
+| Nimble | Approved public category/city and selected public result URLs | User approval tied to request revision |
+| RawTree | Selected measurements and/or minimal workflow/source projections | Separate export approval, off by default |
+| Model download host | Model artifact request | Explicit setup, without voice/history |
+
+Synthetic inputs stay synthetic; actual consenting non-sensitive demonstration recordings are consented_demo. Do not mix these into personal baselines. Synthetic status does not bypass export consent.
+
+Never send audio, transcript text, personal names, private notes, full prompts/model output, credentials, or full local checkpoints to sponsors. Construct outbound objects from typed allowlists. A RawTree checkpoint projection is a limited approved record, not a backup of private agent state.
+
+Show which fields leave the phone. Categories/cities and pseudonymous identifiers may reveal interests. Enabling export must not silently backfill prior sessions. Revocation cancels unsent projections and prevents new dispatches; it cannot recall already delivered or in-flight requests.
+
+Use app-private storage and exclude sensitive files, DB/WAL files, model files, and credential ciphertext from cloud backup and device transfer. Set manifest policy plus applicable explicit backup/data-extraction rules; verify on the S24. allowBackup=false alone is not proof that every transfer path is excluded. [Android backup rules](https://developer.android.com/identity/data/autobackup).
+
+Delete audio after terminal processing no longer needs it; retain complete unprocessed input for recovery. Clean orphan/partial files on startup. Transcripts/checkpoints remain until local deletion. Provide session/profile deletion and cancel queued work/exports. Do not promise forensic erasure or recovery after app-data deletion.
+
+### Private prototype credentials
+
+Use direct phone-to-sponsor HTTPS with owner-provided credentials for the private demo. Enter Nimble/RawTree keys in native settings; there is no Liquid credential.
+
+No shared secrets in source, assets, BuildConfig, QR fixtures, commits, or APKs. Session 3 implements a vault using an Android Keystore-generated encryption key and encrypted token values in private, backup-excluded storage. Tokens never enter model context, logs, checkpoints, screenshots, or analytics. Provide clear-key controls. Keystore does not make API tokens impossible to obtain on a compromised phone. [Android Keystore](https://developer.android.com/privacy-and-security/keystore), [security guidance](https://developer.android.com/privacy-and-security/security-tips).
+
+Do not publicly distribute organization-wide keys. Broader distribution would require scoped authorization or a separately designed credential broker; it must not receive voice history or become the inference/checkpoint host. That service is outside this prototype.
+
+After model setup, the app's external traffic is limited to explicitly approved sponsor operations. No private-content telemetry/crash reports. Opening a source in an external browser requires user action and leaves the app's privacy boundary.
+
+## 5. Session 1 component — Native app, audio, storage
 
 ### Screens
 
-1. **Home:** ClearLine, explicit demo banner, profile history from the API, model/runtime connection status, and current unfinished task. No invented dates or red/green medical-risk badges.
-2. **Check-in:** Consent, record/stop control, elapsed recording duration, local waveform, upload/processing status, and the actual accepted measurements when available. Distinguish recording quality from a health assessment.
-3. **Summary:** Current descriptive measurements, baseline source and session count, unavailable fields, and optional differences. Include “No health interpretation is provided.” Stopping a recording opens a neutral summary, not a mandatory alert.
-4. **Follow-up:** User chooses a public caregiver-support resource category and city; view sources, unknown fields, the pending step, pause/resume, and a compact tool/event timeline.
+1. **Setup:** actual model installation/loading, local transcription readiness, optional sponsor settings, and data explanation.
+2. **Home/history:** local profile, check-ins, open follow-ups, model readiness, and next unfinished step. Earlier sessions/results remain reopenable after starting a new check-in.
+3. **Check-in:** consent, microphone permission, record/stop, elapsed duration, local level meter, interruption and processing status.
+4. **Summary:** descriptive metrics, local baseline provenance/count, null/unavailable fields, optional transcript correction, and “No health interpretation is provided.”
+5. **Follow-up:** category/city approval, source cards/descriptions, retrieval time, unknown fields, pause/resume, and completed/pending action timeline.
 
-### Recording implementation
+UI rendering, Flow collection, recomposition, and history reads must not create jobs or call tools. Debug fixtures are visibly labeled and isolated from real execution.
 
-Use `navigator.mediaDevices.getUserMedia` after a user gesture and consent. Feature-detect `MediaRecorder` and supported MIME types. Record a complete approximately 20–30 second clip; combine all its `dataavailable` blobs and upload only after the recorder's final stop event. The server must receive a complete media container, not an arbitrary fragment assumed to decode on its own. The recording specification only guarantees playability of the combined complete recording, not each individual blob. [S13]
+### Capture and on-device speech recognition
 
-Each clip receives one stable `clip_id`. Reuse it on retry. A logical session may contain multiple clips, including a replacement for unusable input. Store only session/clip identifiers and a minimal client resume token in browser storage; do not persist audio by default.
+Use native AudioRecord with RECORD_AUDIO permission and private PCM/WAV files. Target 20–30 seconds, UI auto-stop at 30 seconds, and processing bounds of 2–60 seconds. These are engineering limits, not clinical thresholds.
 
-Handle permission denial, unsupported format, zero-length audio, timeout, device disconnect, and duplicate upload. Track pending uploads so Stop does not declare a session complete before its final clip has been accepted. Page backgrounding must show an interruption rather than promise uninterrupted capture. Chrome on Android can delay recording events when the screen locks. [S9]
+Choose supported capture settings and produce validated mono 16 kHz PCM for ASR. If another capture rate is needed, explicitly resample and version the method; never just relabel it. Finalize a .part file and atomically promote it before issuing a durable complete-clip receipt. Partial recordings are not accepted input.
 
-**Microphone transport:** Ordinary `http://192.168...` is not a reliable microphone setup because microphone access needs a secure context. Prefer Chrome USB port forwarding and open `http://localhost:3000` on the S24, or use trusted HTTPS. Verify on the actual phone. USB tethering alone is not the same as setting up port forwarding. [S8, S10]
+Keep stable session_id/clip_id, checksum, format, duration, provenance, and method version. Repeated admission of identical content returns the same receipt; reused IDs with different bytes are rejected. Replacement supersedes an earlier clip only after acceptance.
 
-## 5. Component 2 — Backend and audio pipeline
+Handle denied/revoked permission, missing microphone, capture failure, silence, empty/truncated input, timeout, storage exhaustion, backgrounding, and process death. Release the microphone on stop/interruption. Killed in-progress recording may need replacement. [Android recording guidance](https://developer.android.com/media/platform/mediarecorder).
 
-**Stack:** Python, FastAPI, uvicorn, python-multipart, httpx, Pydantic, python-dotenv, SQLite, numpy, librosa, a locally installed Whisper implementation, and ffmpeg. Freeze dependency versions after the smoke test on the build machine. Do not invent a tested version set.
+**ASR:** embed whisper.cpp through a separate Android native module. Evaluate tiny.en or base.en for an explicitly English-language demo; pin the selected model/runtime and verify actual S24 speech. Other languages require an appropriate measured model. [whisper.cpp Android sample](https://github.com/ggml-org/whisper.cpp/tree/master/examples/whisper.android).
 
-Serve the HTML at `/`, assets at `/static`, and application endpoints under `/api`. Register API routes before any catch-all mount. Keep browser calls same-origin; do not enable wildcard CORS as a substitute for a working origin configuration. Require a paired demo session, validate Origin for mutations, and keep secrets server-side.
+Session 1 owns the ASR model manifest, private import/download, digest verification, atomic installation, and readiness implementation in audio/. Session 2's ModelRuntime owns Liquid artifacts. Define separate ASR setup/readiness ports in core/ during bootstrap so the shared setup UI can display and install both models without assuming either is already present.
 
-Use one application process and one serial workflow worker for this prototype. CPU-heavy audio processing must not block the request/event loop: execute it in a controlled thread/process worker. The persistent job table, not an in-memory task object, is the source of pending work. Cache loaded models once.
+Do not silently substitute ordinary SpeechRecognizer: its default service can send audio to servers, and EXTRA_PREFER_OFFLINE is not a guarantee. This build uses embedded recorded-file ASR. A labeled manual-text/debug path does not satisfy voice acceptance. [SpeechRecognizer](https://developer.android.com/reference/android/speech/SpeechRecognizer), [RecognizerIntent](https://developer.android.com/reference/android/speech/RecognizerIntent).
 
-### Clip processing
+Run ASR off the UI thread and coordinate memory with Session 2. Missing models/failed transcription remain visible. Never generate fixture metrics from a real recording.
 
-1. Validate paired session, consent, identifiers, upload size, and supported media.
-2. Save the upload under a server-generated temporary path unique to `(session_id, clip_id)`. Never use an unsanitized client filename or a shared `chunk.wav`.
-3. Persist receipt and enqueue processing before acknowledging it as accepted.
-4. Decode with ffmpeg into a known mono PCM sample rate, using a timeout and an argument list rather than shell interpolation. Inspect duration after decoding.
-5. Check audio quality. Implementation thresholds are engineering filters, not health thresholds. Start with a minimum duration and detectable speech requirement; expose why an input is unusable.
-6. Transcribe locally and permit an optional user correction. Do not interpret an empty/no-speech transcription as reliable text.
-7. Compute descriptive metrics. Use `recording_wpm` for words divided by full clip duration; do not label that speech-only rate. Use pauses only when timestamp granularity supports them. RMS is recording amplitude, not a cross-device health measure. Optional pitch requires a voiced-frame mask; return null when unavailable.
-8. In one local transaction, persist the result, advance the job, and queue allowlisted cloud events. Remove temporary media in success/failure cleanup once no accepted job needs it. If a crash occurs before features commit and the file remains, recover it; if it is missing, ask for a new recording.
+### Measurements and local baseline
 
-Do not promise secure forensic erasure of temporary files. State the actual retention behavior.
+Preserve these meanings; example values below are not expected demo results:
 
-### Stable metric contract
-
-```json
+~~~json
 {
   "duration_s": 24.1,
   "word_count": 45,
@@ -140,364 +186,368 @@ Do not promise secure forensic erasure of temporary files. State the actual rete
   "pitch_mean_hz": null,
   "quality": "accepted",
   "quality_reasons": [],
-  "data_origin": "consented_demo"
+  "data_origin": "consented_demo",
+  "measurement_version": "android-pcm-v1"
 }
-```
+~~~
 
-Numbers above illustrate the schema, not expected demo results. Null means unavailable, never zero by substitution.
+Compute duration/normalized RMS from actual PCM, word count from local transcription, and recording_wpm from words divided by full recording duration. Define/version lexical counting. Pitch/pauses remain null in this MVP. Reject unusable/silent/no-speech input; ASR text alone is not proof of speech.
 
-Aggregate completed clips into **one versioned summary per completed session**. Duration-weight relevant quantities, retain measurement-method versions, and exclude rejected/superseded clips. A changed transcript produces a new summary version and invalidates dependent comparisons.
+Produce one versioned summary per completed session from accepted non-superseded clips. Pool words/duration for WPM; calculate pooled RMS from duration-weighted squared RMS. Transcript corrections update word-derived quantities and dependent summaries/comparisons while retaining acoustic measurements.
 
-### Baseline behavior
+**Room is the baseline authority.** Select the latest versions of the last five eligible completed prior sessions, excluding current, matching profile/task/method/provenance. Require two prior sessions for this prototype's comparison; otherwise return insufficient_history. Show values, mean, and delta. Zero variance means no standardized difference, never a risk score.
 
-Retrieve the latest version of the last five eligible completed sessions, excluding the current session. Deduplicate repeated event deliveries before computing statistics. Match recording task, measurement version, and demo/person provenance. Do not quietly combine different people or synthetic and real histories as a personal baseline.
+Export off, missing keys, and airplane mode must not prevent local history, comparison, or resume. Synthetic history is never a real speaker's established baseline.
 
-Show session count, baseline source, and missing metrics. With insufficient history, return `insufficient_history`, not “normal” or a zero risk score. Show descriptive current value, mean, and delta. An optional standardized difference is not a risk probability and must not trigger clinical action. Do not divide by an arbitrary tiny constant to turn a zero-variance baseline into an alarming score.
+### Persistence
 
-## 6. Sponsor API contracts
+Use versioned Room migrations for profiles, sessions, clips, jobs, actions, checkpoints, events, session_summaries, source_versions, consent_records, and outbox. Keep stable IDs, input_revision, state_version, timestamps, and provenance/method versions. [Room](https://developer.android.com/training/data-storage/room).
 
-### 6.1 RawTree — not legacy Tinybird Events/Pipes
+Session 1 implements WorkflowStore; Session 2 decides workflow transitions. Atomically commit a successful action's result, checkpoint/state update, and approved outbox projections. Never hold a DB transaction across inference/HTTPS or split that success bundle into independent commits.
 
-Use `RAWTREE_API_KEY`, `RAWTREE_DATABASE`, and `RAWTREE_BASE_URL`. The default documented base is `https://api.rawtree.com`. RawTree documents these operations: [S11]
+## 6. Session 2 component — Local agent and recovery
 
-```http
-POST /v1/tables/clearline_events
-Authorization: Bearer <RawTree key>
-x-rawtree-database: <database>
-Content-Type: application/json
-```
+Liquid proposes a tool. Deterministic Kotlin validates identity, consent, arguments, limits, permitted state, and completion, then executes it.
 
-Body: one event object or an array of event objects.
+| Tool | Execution |
+| --- | --- |
+| get_baseline_summary | Local Room history |
+| compare_recording_metrics | Local deterministic descriptive comparison |
+| search_public_resources | Nimble request matching approved category/city exactly |
+| extract_public_page | Nimble extraction of a result from that approved search |
+| request_user_input | Persist a bounded relevant missing-input request |
+| finish_task | Complete only with required comparisons/evidence and satisfied constraints |
 
-```http
-POST /v1/query
-Authorization: Bearer <RawTree key>
-x-rawtree-database: <database>
-Content-Type: application/json
+RawTree export is consent-controlled outbox work, not a model tool that can grant permission. An optional “View exported history” screen uses bounded reads without replacing local recovery.
 
-{"sql":"SELECT * FROM clearline_events LIMIT 1"}
-```
+Allow one proposed action at a time and initially 12 actions per workflow revision. Bound model/HTTP retries; exhausted budgets remain visibly unfinished. Never fabricate facts after failure.
 
-For the default JSON query format, rows are under `data`. Handle non-2xx responses and an unexpected response shape explicitly. Never use `api.tinybird.co/v0/events` or `/v0/pipes/...` for a RawTree account. The schema-free table creation does not remove application-schema validation. [S11, S15]
+### States and revisions
 
-Use a `read_write` key for the application where permitted. RawTree keys apply at organization/cluster scope, not just the selected database; a database header is not a security boundary. Never expose the key in the phone frontend. [S16]
+~~~text
+recording -> processing -> comparing -> awaiting_user_choice
+                                      -> researching -> ready
 
-Create named application operations: `append_event`, `read_baseline`, `read_latest_checkpoint`, and `read_evidence_version`. Expose bounded, schema-validated tool arguments rather than unrestricted SQL. Build SELECT statements from fixed templates and validated UUIDs/allowlisted identifiers. RawTree's documented query interface accepts a final SQL string and supports read-only queries; do not invent a server-side parameter API. [S15]
+Interruptions/blockers:
+awaiting_input, waiting_network, waiting_retry, paused, agent_unavailable
+~~~
 
-Tables:
+Model readiness is separate component state. Stored clips can wait for missing models. ready means the current task is complete, not that a person is medically safe.
 
-- `clearline_events`: append-only approved workflow events.
-- `clearline_session_summaries`: versioned, approved complete-session measurements.
-- `clearline_checkpoints`: versioned, export-approved compact checkpoint projections.
-- `clearline_resource_versions`: public source facts and version references.
+City/category edits create a research revision and invalidate its dependent search/extract work. Transcript corrections version measurements and invalidate dependent comparisons. Reject stale revisions. Obsolete in-flight results cannot update current state or enqueue exports. Keep accepted clip identity intact.
 
-Application state changes are represented by new events/snapshots. Do not assume RawTree supplies row-level upserts, queue leases, uniqueness constraints, compare-and-swap, or exactly-once delivery. The supplied docs establish ingestion and analytical SELECTs, not those workflow guarantees. Use SQLite for local transactional coordination and an outbox for retries.
+Store full action results locally and compact references in checkpoints.
 
-### 6.2 Nimble — Search plus source verification
+### Durable execution
 
-Use direct HTTP through a server-side `httpx.AsyncClient` to keep this Python app small. These are documented endpoints and minimal request shapes, not tested credentialed calls. [S5, S6]
+1. Transactionally claim one eligible job and record its revision and planning attempt.
+2. If no valid persisted plan exists, run bounded inference outside the transaction to propose an action, then validate it. A killed planning attempt may regenerate; no tool has executed yet.
+3. Recheck revision/consent and transactionally save the validated plan, stable action_id, and matching assistant/tool-call identity before executing its tool. On resume, reuse a valid persisted plan rather than asking the model to create another.
+4. Execute the bounded/cancellable local or HTTP tool outside the transaction.
+5. Recheck revision/consent, then atomically persist result, success marker, checkpoint/state, and approved export records.
+6. On reopen, inspect durable jobs/actions. Reuse committed successes. Interrupted uncommitted tool work becomes unknown/retryable using its logical identity.
+7. Show the restored pending step and require explicit Resume for interrupted foreground work. Repeated Resume is idempotent.
+8. Pause stops new actions at a committed boundary; show “Pausing” while cancellation/commit is still underway.
 
-```http
+Persist during execution, not only Activity cleanup: process death may occur without a final callback. [Android process lifecycle](https://developer.android.com/guide/components/activities/process-lifecycle).
+
+External execution is not exactly once. Uncommitted search/extract may repeat; an export delivered before its acknowledgement may replay with the same event ID. Deduplicate in analytical reads. Committed successful Search must not rerun just because the app reopened.
+
+Recovery assumes surviving phone storage. No recovery after uninstall, clearing data, losing the device, or destroying the DB. Test Activity recreation, backgrounding, and process death separately.
+
+Foreground work resumes after manual reopen. Optional WorkManager retries approved outbox entries with connectivity constraints, using the same claim rules rather than another workflow engine. No promise of immediate scheduling, continuous inference, or automatic force-stop recovery. [Android background work](https://developer.android.com/develop/background-work/background-tasks/persistent/getting-started/define-work).
+
+### Compact context
+
+Use current goal/scope, unresolved requirements, revision, measurements, local summary references, recent action/results, and short relevant public passages. Do not append the entire history or raw audio.
+
+Start with at most 3072 rendered input tokens and 768 output tokens within 4096, leaving headroom. These are project budgets to measure. Include templates/tools/role messages in counts. Trim optional passages first; if required state cannot fit, return context_capacity_exceeded instead of forgetting obligations.
+
+Compression starts as a versioned deterministic projection; the full local ledger survives. Optional model summaries cannot replace structured goals, consent, evidence, committed facts, or pending actions.
+
+Public pages are untrusted evidence, never instructions to change tools, consent, identity, city, or privacy rules. Tools reference committed sources/session IDs, not arbitrary paths, SQL, or page-supplied actions.
+
+## 7. Shared Kotlin contracts and ownership
+
+Create modules under android/:
+
+~~~text
+app/          Compose screens, navigation, application composition, manifest
+core/         Typed DTOs, sealed actions/errors, interfaces and validation contracts
+storage/      Room schema, migrations, transactional WorkflowStore
+audio/        Capture, PCM validation/metrics, whisper.cpp JNI and ASR
+inference/    Model artifacts, llama.cpp JNI, tokenizer and Liquid tool calls
+agent/        Commands, state machine, coordinator, context and outbox scheduling
+sponsors/     Nimble/RawTree HTTPS, credentials and export validation
+docs/         Native setup and actual acceptance records
+~~~
+
+Freeze this interface sketch during bootstrap; it is not compilable code with all DTOs already defined:
+
+~~~kotlin
+interface CheckInCommands {
+    suspend fun createSession(input: CreateSession): SessionId
+    suspend fun acceptClip(input: CompletedLocalClip): ClipReceipt
+    suspend fun finishCapture(sessionId: SessionId)
+    suspend fun requestResources(input: ApprovedResourceRequest)
+    suspend fun applyInput(input: RevisionedUserInput)
+    suspend fun pause(sessionId: SessionId)
+    suspend fun resume(sessionId: SessionId)
+    suspend fun setExportConsent(input: ExportConsentChange)
+    suspend fun deleteSession(sessionId: SessionId)
+    suspend fun deleteProfile(profileId: ProfileId)
+}
+interface CheckInQueries {
+    fun observeSession(id: SessionId): Flow<SessionSnapshot>
+    fun observeHistory(id: ProfileId): Flow<List<SessionSummary>>
+    fun observeOpenFollowUps(id: ProfileId): Flow<List<SessionSnapshot>>
+    fun observeReadiness(): Flow<ComponentReadiness>
+}
+interface LocalAgent {
+    suspend fun propose(checkpoint: AgentCheckpoint): ProposedAction
+}
+interface ModelRuntime {
+    val status: StateFlow<ModelStatus>
+    suspend fun install(artifact: ApprovedModelArtifact)
+    suspend fun load(modelId: ModelId)
+    suspend fun unload()
+}
+interface LocalAudioProcessor {
+    suspend fun process(clip: CompletedLocalClip): AudioResult
+}
+interface PublicResourceClient {
+    suspend fun search(request: ApprovedResourceRequest): SearchResult
+    suspend fun extract(source: ApprovedSource): SourceEvidence
+}
+interface ApprovedHistoryClient {
+    suspend fun append(event: ApprovedExport): DeliveryReceipt
+    suspend fun query(request: BoundedHistoryQuery): HistoryResult
+}
+interface SponsorCredentialSettings {
+    fun observeStatus(): Flow<List<CredentialStatus>>
+    suspend fun setCredential(service: Sponsor, value: SecretValue)
+    suspend fun clearCredential(service: Sponsor)
+}
+~~~
+
+Define SponsorCredentialSettings in core/; Session 3 implements it. Expose only configured/missing/error metadata to the UI, with no token-reading method. SecretValue must never be logged or serialized into app state; only the sponsor adapter's internal credential provider can retrieve a token for an authorized request.
+
+WorkflowStore must expose atomic command application, job claim, plan persistence, success/result/checkpoint/outbox commit, failure recording, startup recovery, baseline reads, outbox claim/acknowledgement, consent revocation, and deletion. Test rollback/uniqueness. Queries must not run external work.
+
+Profile deletion first cancels its execution and transactionally invalidates all associated jobs/actions/outbox entries while deleting local records; clean associated files with restart-safe cleanup. Late results must not recreate deleted state. This does not imply deletion of previously delivered cloud records.
+
+SessionSnapshot includes IDs, phase, state/input versions, execution_mode, metrics, comparison, sources/resources, pending action/input, errors, provenance, consent, and cloud-sync counts. Distinguish real_on_device from synthetic_fixture; configuration is not verified model readiness.
+
+SourceEvidence includes title, nullable description, source URL, retrieval time, content hash, evidence/version identity, supporting passages, nullable facts, and verification status. Preserve description into the UI. “Source backed” does not establish service availability.
+
+Use immutable typed DTOs, sealed actions/errors, UUIDs, enums, bounded strings/lists, explicit nulls, and versioned serialization. Controller code assigns identity; model output cannot create action IDs or switch profiles.
+
+### Bootstrap order
+
+1. Session 1 creates root Android configuration, module shells, and core contracts.
+2. Sessions 2/3 review the contracts; Session 1 records a shared bootstrap checkpoint before parallel implementation. Research can proceed while waiting.
+3. Session 2 proves minimal on-device model loading/tool round trip before substantial UI polish. Session 1 independently proves local capture/ASR.
+4. Session 3 implements frozen ports; Session 1 wires concrete implementations in app/. Missing components show unavailable, not fake success.
+5. Session 1 owns root Gradle/version catalog, manifest, and core/ edits. Other sessions coordinate changes instead of silently editing shared definitions.
+
+Concrete modules depend on core/; app/ composes them; agent/ receives ports. Sponsor adapters neither mutate Room nor advance workflows. Each session owns its module build/native files after bootstrap.
+
+## 8. Session 3 component — Optional sponsor tools
+
+Use native HTTPS clients with bounded request/response sizes, timeouts, cancellation, typed errors, and redacted logs. Keep TLS verification enabled. Never retry authorization failures indefinitely or invent successful fallback results.
+
+### Nimble
+
+Call Search from the phone only for the approved public request:
+
+~~~http
 POST https://sdk.nimbleway.com/v2/search
-Authorization: Bearer <Nimble key>
+Authorization: Bearer <Nimble credential>
 Content-Type: application/json
 
-{
-  "query": "caregiver support groups in <user-approved city>",
-  "country": "US",
-  "max_results": 3,
-  "full_content": false
-}
-```
+{"query":"caregiver support groups in <approved city>","country":"US","max_results":3,"full_content":false}
+~~~
 
-Read the `results` list; retain `title`, `url`, `description` and `request_id`. A search result is a lead, not proof that hours, services, or availability are current.
+Preserve result title, URL, description, and request_id. Categories caregiver_support, respite_care, and caregiver_education map to fixed public phrases. Do not generate searches from private transcript contents. [Nimble Search](https://docs.nimbleway.com/api-reference/search/search).
 
-```http
+~~~http
 POST https://sdk.nimbleway.com/v2/extract
-Authorization: Bearer <Nimble key>
+Authorization: Bearer <Nimble credential>
 Content-Type: application/json
 
-{"url":"<selected public source URL>","render":true}
-```
+{"url":"<selected public search-result URL>","render":true}
+~~~
 
-Require successful task and target-fetch status where provided. Read `data.markdown` if returned, otherwise clean `data.html` locally; do not assume a markdown field is always populated. A `task_id` alone is not a completed verified result. [S6, S17]
+Check completion/target status where provided. Parse markdown or clean returned HTML; a task_id alone is not completed evidence. Keep retrieval time and content identity. [Nimble Extract](https://docs.nimbleway.com/api-reference/extract/extract).
 
-Liquid chooses which relevant official organization page to inspect next. Store each proposed public fact with its source URL, retrieval time, exact supporting passage reference, and content version/hash. Missing fields remain null. Distinguish “the source states this” from “we independently verified availability.” Do not invent contact details or substitute hard-coded clinics on failure.
+Only extract relevant public HTTP(S) organization pages returned by the approved search. Reject userinfo, localhost, private/link-local addresses, unsupported schemes, and disallowed redirects. Phone checks cannot guarantee Nimble's remote DNS/redirect behavior; validate returned URLs and document this limit.
 
-Set explicit request timeouts, bounded retries, and a task budget. A timeout becomes an unfinished step that can resume. Restrict extraction to public HTTP(S) sources selected for the task; block credentials in URLs, localhost/private addresses, and unrelated targets. Treat all fetched text as untrusted evidence, never as new agent instructions.
+Every displayed fact needs a supporting passage reference. Missing phone/address/hours stay null; do not infer availability. Separate search candidates from extracted evidence. Label cached evidence/timestamps. Refreshes create immutable content versions, preserving old fact-to-source associations. Deterministic changed-page fixtures must be labeled simulated updates.
 
-Nimble's Node package is `@nimble-way/nimble-js`; its docs show `nimble.search(...)` and `nimble.extract.run(...)`. That is an alternative server implementation, not a required second backend. The Python client is `nimble_python` and includes `AsyncNimble`. [S7, S18]
+### RawTree
 
-**Development versus runtime:** The agent-skills/plugin page installs skills/MCP into a coding assistant. It can help build and inspect the integration, but does not automatically execute Nimble inside ClearLine. Use a real application tool call during the demo. Borrow cookbook patterns such as source-backed fields and change tracking, not a previous complete project. [S19, S20]
+RawTree stores only selected exported data. Room remains authoritative for baselines, queue claims, actions, checkpoints, and recovery.
 
-### 6.3 Liquid AI — actual model-selected tools
+Port the existing adapter's REST contract:
 
-Use the locally served model via `POST {LIQUID_BASE_URL}/chat/completions`. The request includes the configured model alias, messages, and a small set of function schemas.
+~~~http
+POST https://api.rawtree.com/v1/tables/<allowlisted_table>
+Authorization: Bearer <RawTree credential>
+x-rawtree-database: <configured database>
+Content-Type: application/json
 
-Liquid's tool-use docs distinguish model-generated calls from the application's responsibility to execute functions and return tool results. Tool output may be Python-like in raw model text; that is not executable application code. Prefer the server's parsed structured `tool_calls`. Never use `eval` or `exec` on model text. [S21]
+<one approved projection or a bounded array>
+~~~
 
-Before integration, complete a harmless `echo_nonce` smoke test: require the model to request the named tool; execute it locally; return a result containing a nonce not present in the original prompt; obtain a second model response using that result. Verify model identity and structured call parsing. Chat-only success is insufficient.
+~~~http
+POST https://api.rawtree.com/v1/query
+Authorization: Bearer <RawTree credential>
+x-rawtree-database: <configured database>
+Content-Type: application/json
 
-If parsing fails, surface `agent_unavailable` and fix the runtime/template or deliberately test the smaller supported model. Do not silently run Python rules while claiming the Liquid agent succeeded. Any manual/fallback mode must be visibly labeled and must not count as successful sponsor integration.
+{"sql":"<fixed SELECT template with bounded validated identifiers>"}
+~~~
 
-## 7. Component 3 — Long-horizon agent and state
+RawTree's official introduction confirms ingestion/query endpoint forms. Detailed API/auth pages could not be retrieved while preparing this revision. Recheck database-header behavior, credential scope, response shape, and account access during live Android integration. The current adapter's expected data row envelope is a contract to validate, not a newly verified API guarantee. [RawTree introduction](https://rawtree.com/blog/introducing-rawtree), [API reference](https://rawtree.com/docs/reference/api), [authentication](https://rawtree.com/docs/reference/authentication), [query guide](https://rawtree.com/docs/guides/query-data).
 
-### Tool menu
+Allowlisted tables and maximum permitted projections:
 
-Expose only the subset appropriate to the current phase:
+- clearline_events: stable export/event ID, pseudonymous session reference, enum event/status, revision, timestamp, provenance.
+- clearline_session_summaries: separately selected descriptive metrics and method/version fields.
+- clearline_checkpoints: selected phase/completed/pending counts and references; no goals, prompts, transcripts, private input, or full checkpoint.
+- clearline_resource_versions: approved public facts, evidence identity, URL, retrieval time, and supporting public passages.
 
-- `get_baseline_summary(profile_id, session_id)`: bounded RawTree retrieval, latest session versions, provenance checked.
-- `compare_recording_metrics(session_id, baseline_ref)`: deterministic local descriptive comparison.
-- `search_public_resources(category, city)`: Nimble Search after explicit user approval.
-- `extract_public_page(source_ref)`: Nimble Extract for an approved returned source.
-- `request_user_input(reason_code, question)`: create a pending input request, never fabricate an answer.
-- `finish_task(summary, evidence_refs)`: propose completion; the controller validates all requirements before accepting it.
+Validate immutable ApprovedExport values at enqueue and dispatch, including current consent/revision. Never expose arbitrary SQL to Liquid. A database selector does not establish per-user authorization or narrow credential scope.
 
-The controller handles ingestion, authorization, persistence, token accounting, and deterministic safety/quality gates. Liquid selects the next permitted action, interprets failures, and decides whether another source or clarification is needed. It cannot bypass consent, change profile identity, execute arbitrary SQL, or declare unsupported clinical findings.
+The local outbox owns IDs/delivery state. Cloud ingestion is not a queue lease, uniqueness guarantee, compare-and-swap, or exactly-once primitive. Deduplicate repeated event IDs and select latest eligible versions in bounded queries. Cloud records must not overwrite local checkpoints or be counted twice in local history.
 
-### States and transitions
+**Live gates:** from the S24, explicitly approve a synthetic event write, query that exact ID from the intended database, and complete Nimble Search plus Extract. Missing keys/network are unavailability. Synthetic smoke-test exports still require approval.
 
-`recording → processing → awaiting_input | comparing → awaiting_user_choice → researching → waiting_retry | ready`
+## 9. Three Codex implementation sessions
 
-`paused` and `agent_unavailable` are explicit states. `ready` means the current administrative/check-in task is complete, not that the person is medically safe. Future sessions and open follow-ups may continue separately.
+All sessions must read this revision fully. These commands replace the previous web/backend split.
 
-An invalid clip requests replacement. Insufficient history displays that fact. A user correction invalidates only the comparison depending on the changed input. Changing the requested city invalidates resource-search work, not previously accepted audio. A source failure retains the unresolved action. A changed public page creates a new evidence version and retires the obsolete current-state fact without erasing audit history.
+### Session 1 — Android/mobile app
 
-### Durable state
+**User command:** Run Session 1
 
-Use a local SQLite transaction for every accepted state transition. Persist: `session_id`, `profile_id`, `state_version`, `input_revision`, `phase`, `consent`, accepted input references, baseline version reference, unresolved requirements, pending action, action status, retry time, and export status.
-
-The active model checkpoint is a bounded projection, for example:
-
-```json
-{
-  "schema_version": 1,
-  "session_id": "<uuid>",
-  "state_version": 7,
-  "input_revision": 2,
-  "phase": "researching",
-  "goal": "Find user-requested caregiver support resources",
-  "baseline_ref": "<versioned reference>",
-  "accepted_clip_refs": ["<clip reference>"],
-  "current_measurements_ref": "<summary reference>",
-  "unresolved_requirements": ["source-backed contact information"],
-  "pending_action": {"name":"extract_public_page","source_ref":"<source reference>"},
-  "recent_completed_action_refs": ["<action reference>"],
-  "completed_action_watermark": 5,
-  "evidence_refs": ["<versioned source reference>"],
-  "execution_mode": "liquid_local"
-}
-```
-
-Do not send private consent details or full local state to cloud storage accidentally. Construct a separate approved export projection.
-
-### Idempotency and crash recovery
-
-Use unique local `(session_id, clip_id)` and `action_id` records. The controller, not the model, assigns stable action IDs before tool execution. Persist `planned → started → succeeded/failed/unknown`, the result reference, and the state version.
-
-Commit accepted results and outbox rows together. Outbox delivery retries the same `event_id`; RawTree may contain duplicate deliveries, so deduplicate them in analytical queries. Versioned summaries must not count twice in a baseline.
-
-On restart, recover durable jobs and resume from the last committed boundary. Reuse successful tool results when their inputs/source validity still match. A read-only web request interrupted after sending but before receiving may be retried; do not promise exactly-once external execution. Keep external writes such as sending emails, booking, or submitting forms out of the MVP.
-
-RawTree is the event/evidence history and analytics service, not the transactional job queue. SQLite is the local recovery mechanism. Name both honestly. Demonstrate a backend process restart on the same laptop; do not claim survival of disk/device loss.
-
-### Context compression
-
-Keep the current goal, constraints, bounded pending work, baseline summary, current metrics, recent action references, and relevant source excerpts. Store full permitted evidence/history outside the active model prompt. Retire stale facts by version, and retain references for later inspection.
-
-Target a total 4,096-token runtime context with a conservative input allowance and output reserve. Include system text, tool schemas, and evidence in the budget. Use the runtime's supported tokenization/template facilities to enforce a tested budget; record actual prompt usage when available. Report bytes or estimates as such, not as measured tokens. Limit each activation to a small tool-call budget and persist before yielding.
-
-Do not prune away unfulfilled obligations to meet the context target. Cap the active queue and keep additional work in durable storage. Recent completed-action lists are bounded; the complete action ledger is not re-injected into prompts.
-
-## 8. Shared application contract
-
-All lanes use these routes; changing them requires updating the contract first.
-
-| Method and route | Responsibility |
-|---|---|
-| `POST /api/sessions` | Create paired, consented demo session; return server-owned session ID. |
-| `POST /api/sessions/{id}/clips` | Accept complete recording with stable `clip_id`; persist and queue. |
-| `POST /api/sessions/{id}/finish` | Mark capture complete; queue comparison after accepted uploads finish. |
-| `POST /api/sessions/{id}/resources` | Save explicit category/city request and queue research. |
-| `POST /api/sessions/{id}/input` | Apply requested user correction/answer with revision checking. |
-| `POST /api/sessions/{id}/pause` | Request a durable pause at a safe boundary. |
-| `POST /api/sessions/{id}/resume` | Resume eligible unfinished work, once. |
-| `GET /api/sessions/{id}` | Read stored status only. No model/tool calls, ingestion, or re-enqueue. |
-| `GET /api/profiles/{id}/history` | Return authorized, version-deduplicated session summaries. |
-| `GET /api/health` | Report known component readiness without returning secrets. |
-
-Status includes `session_id`, `state_version`, `phase`, `execution_mode`, `metrics`, `comparison`, `resources`, `pending_action`, `errors`, `provenance`, and `cloud_sync`. Unknown metrics are null. Resources include source URLs, retrieval times, verification status, and unknown fields. Errors distinguish retryable failures from unavailable credentials or an invalid tool call.
-
-Do not return `drift_score`, `clinical_risk`, `emotion`, `alert_fired`, invented report images, or an internally inconsistent 0–100/1.5 threshold. The UI is a view of stored state, not a second scoring engine.
-
-## 9. Codex three-session build plan
-
-This specification is designed to be placed in the repository root as `ClearLine_Fixed_Build_Spec.md`. Open **three separate Codex chats** against the same repository. In each chat, you only need to say one of the exact commands below after Codex can see this file:
-
-- `Run Session 1`
-- `Run Session 2`
-- `Run Session 3`
-
-Codex must treat this file as the source of truth. Each session must inspect the repository before changing anything, stay inside its ownership boundaries, preserve working code from the other sessions, and report exactly what it changed and tested. Never silently replace sponsor integrations with fake success.
-
-### Session 1 — Mobile frontend
-
-**User command:** `Run Session 1`
-
-**Codex instruction:**
-
-> You are Session 1 of the ClearLine build. Read `ClearLine_Fixed_Build_Spec.md` completely before editing. Build only the phone-first frontend and the smallest frontend-only helpers needed to exercise the shared API contract. Do not implement Liquid AI, RawTree, Nimble, SQLite workflow logic, audio analysis, or backend business logic.
+> Build the native S24 app shell, microphone/audio flow, Room persistence, and Compose UI.
 >
-> Your ownership is `frontend/` only. If the repository does not yet have that directory, create it. Do not edit `backend/`, `.env`, sponsor integration files, or dependency files owned by the other sessions.
+> Own android/app/, android/core/, android/storage/, android/audio/, root Android Gradle/version configuration, manifest, and associated tests. Create the shared module/contracts bootstrap first and coordinate it with Sessions 2 and 3.
 >
-> Implement a Samsung Galaxy S24-friendly mobile UI with these screens: Home, Check-in, Summary, and Follow-up. The UI must include explicit recording consent, a demo-data banner, model/runtime connectivity status, current unfinished task, record/stop controls, elapsed time, waveform or simple live level visualization, upload/processing states, descriptive metrics, baseline provenance/session count, resource cards with source URL/retrieval status, pause/resume controls, and a compact event/tool timeline. Do not show cognitive-risk, diagnosis, emotion labels, clinical alerts, or fabricated medical conclusions.
+> Implement real AudioRecord and embedded whisper.cpp on the phone, complete-file admission, measurements, provenance, local profiles/history, reopenable prior follow-ups, consent/deletion, backup exclusions, and transactional WorkflowStore.
 >
-> Use the exact shared routes from Section 8. Poll `GET /api/sessions/{id}` as a read-only status endpoint. Polling must never trigger work. Use `POST /api/sessions`, `/clips`, `/finish`, `/resources`, `/input`, `/pause`, and `/resume` only for the actions defined in the spec.
+> Build model install/load controls against Session 2's ModelRuntime and sponsor settings against Session 3's credential interface. Do not implement laptop hosting, a FastAPI-dependent browser wrapper, Liquid HTTP inference, or sponsor calls in UI code.
 >
-> Recording requirements: use `getUserMedia` only after a user gesture and consent; feature-detect `MediaRecorder`; create one complete approximately 20–30 second recording; combine `dataavailable` chunks and upload only after the final stop event; generate one stable `clip_id` and reuse it on retry. Handle permission denial, unsupported MIME type, zero-length recording, upload timeout, duplicate retry, disconnect, and interrupted page state. Do not assume arbitrary timeslice blobs are independently decodable.
+> Wire concrete implementations in app/ when available. Keep fixtures labeled and debug-only. Missing runtime dependencies remain visible. Verify native audio and Liquid libraries coexist in the APK.
 >
-> Keep the implementation simple: plain HTML/CSS/JS unless the repository already has an established frontend framework. Prefer same-origin API calls. Do not embed secrets or call RawTree/Nimble directly from the browser.
+> Run unit/Room/UI checks and real S24 capture/transcription when hardware is available. Report files, reproducible build/install steps, retention, real versus simulated tests, and blockers. Web-preview success does not prove Android execution.
+
+**Deliverable:** installable native UI with local capture/transcription/storage, model-loading controls, and working component boundaries.
+
+### Session 2 — Local Liquid agent
+
+**User command:** Run Session 2
+
+> Own android/inference/, android/agent/, their tests, and model/runtime documentation. Use frozen core contracts and Session 1's transactional storage.
 >
-> Because Session 2 may not be finished yet, add an obvious `DEMO_FIXTURE_MODE` or mock adapter that can render the interface from clearly labeled fixture responses without changing the production API shape. It must be trivial to disable once the real backend exists. Fixture data must be visibly labeled synthetic/demo data.
+> Embed pinned llama.cpp via NDK/JNI. Load Liquid GGUF files from private phone storage. Implement artifact integrity/install, tokenizer/template handling, strict typed tool calls, cancellation/unload, and model readiness. No Liquid key/cloud endpoint, Ollama, or llama-server.
 >
-> Before finishing, test the UI locally in a narrow mobile viewport and verify that the frontend issues only the documented API calls. Report: files changed, how to launch the frontend with the backend, what is mocked, what is real, and any blockers. Do not claim phone microphone testing unless it was actually tested on the S24.
-
-**Session 1 deliverable:** A usable mobile interface in `frontend/` that can switch from labeled fixtures to the real shared API without a redesign.
-
----
-
-### Session 2 — FastAPI, audio pipeline, SQLite, and recovery worker
-
-**User command:** `Run Session 2`
-
-**Codex instruction:**
-
-> You are Session 2 of the ClearLine build. Read `ClearLine_Fixed_Build_Spec.md` completely before editing. Build the backend API, local persistence, audio-processing pipeline, durable job/checkpoint system, and recoverable worker. Do not implement the Liquid tool loop or the RawTree/Nimble adapters; expose clean interfaces that Session 3 can implement. Do not edit `frontend/`.
+> First prove offline S24 echo_nonce call/result/second inference. Chat-only output does not pass. Benchmark the candidate model on the actual device; record identity, memory, latency, and failures.
 >
-> Your ownership is `backend/main.py`, `backend/api/`, `backend/audio/`, `backend/storage/`, `backend/worker/`, local database/migration code, and backend dependency configuration. If these paths do not exist, create a clean structure. Preserve any working code already created by another session.
+> Implement CheckInCommands, local-baseline tools, state machine, validation, bounded context, revision invalidation, serialized coordinator, recovery, pause/resume, and consent-controlled outbox scheduling.
 >
-> Implement every route in Section 8 exactly. `GET /api/sessions/{id}` must be read-only and must never enqueue work, call a model, call a sponsor API, or advance state. Use SQLite for sessions, clips, jobs, action ledger, checkpoints, outbox, and idempotency. Persist every accepted transition transactionally. Use stable `(session_id, clip_id)` uniqueness and stable `action_id`s.
+> Private state stays on the phone. Sponsor work uses Session 3's typed ports. Preserve action identities and model/tool exchanges across process death. UI observation never executes work.
 >
-> Implement the state machine from Section 7, including `paused` and `agent_unavailable`. Implement durable pause/resume at safe boundaries. On backend restart, recover unfinished jobs from the last committed checkpoint. Never promise exactly-once network execution; reuse committed successful results and retry unfinished read-only work safely.
+> Test storage transaction boundaries, bad tool output, local no/zero-variance history, oversized context, offline behavior, cancellation, repeated resume, and true process death. Report actual runtime/model/device, measured results, and blockers. No cloud/scripted-planner substitution.
+
+**Deliverable:** real in-process Liquid agent with validated tools and recovery from local state.
+
+### Session 3 — Sponsor integrations
+
+**User command:** Run Session 3
+
+> Own android/sponsors/, its tests and documentation. Implement Nimble/RawTree HTTPS, credential vault, bounded parsing, source evidence, export allowlists, and live probes against shared interfaces.
 >
-> Audio requirements: accept complete uploads only; write to unique temp paths; decode with ffmpeg using an argument list and timeout; inspect duration; reject unusable/silent input with explicit quality reasons; transcribe locally; compute the stable descriptive metric contract; return null for unavailable values; aggregate accepted clips into one versioned session summary; exclude rejected/superseded clips. Remove the emotion classifier, cognitive-risk logic, clinical thresholds, and readability/vocabulary scoring from the MVP.
+> Use direct native phone requests with owner-provided private-demo keys. No secrets in APK/source, prompts, logs, or checkpoints. No Liquid endpoint/key.
 >
-> Baseline requirements: last five eligible completed session versions, excluding the current session, deduplicated by latest version and matching provenance/measurement method. Return `insufficient_history` when appropriate. Never output a risk probability or clinical interpretation.
+> Nimble receives only approved public category/city and selected result URLs. Preserve descriptions, citations, timestamps, hashes, and unknown fields. Treat pages as untrusted evidence.
 >
-> Create a small integration boundary for Session 3, for example an `AgentRunner`/`SponsorTools` protocol or service interface. The worker should be able to ask that interface for the next permitted action and execute it, but Session 2 must not fake sponsor success if Session 3 is absent. Surface `agent_unavailable` instead.
+> Recheck RawTree's account/API contract and live responses. Require export approval for all data origins, including synthetic. RawTree stays optional for local history/comparison/recovery.
 >
-> Implement the outbox pattern for approved RawTree exports without embedding RawTree HTTP code here. Construct allowlisted export projections so raw audio, transcript text, names, secrets, and unrestricted model messages cannot accidentally leave the local machine.
+> Do not mutate Room, create another queue, grant consent, or implement the planner. Return typed results/errors; Session 2 schedules retries/outbox.
 >
-> Add tests for: duplicate clip upload, repeated status polling, crash/restart recovery, pause/resume, invalid audio, no history, zero-variance history, and outbox retry idempotency. If ffmpeg/Whisper are unavailable, fail visibly and document setup rather than substituting fake metrics.
+> Run approved live probes on the S24. Coordinate: commit Search, stop the app process, manually reopen/resume, and execute unfinished Extract without recapturing audio or rerunning committed Search.
 >
-> Before finishing, run the backend tests you can actually execute. Report: files changed, database schema, routes implemented, recovery test result, audio dependencies required, integration interfaces Session 3 must implement, and any blockers.
+> Report changed files, real calls, data-flow verification, unknown fields, recovery results, and blockers. Mocks and desktop calls do not prove phone execution.
 
-**Session 2 deliverable:** A real FastAPI/SQLite application that can accept a phone recording, persist state, recover after restart, and wait cleanly for sponsor-agent integration.
+**Deliverable:** optional public-resource and approved-history tools connected to the Android agent.
 
----
+### Coordination rules
 
-### Session 3 — Liquid AI + RawTree + Nimble agent integrations
+- Inspect before editing; preserve other sessions' working changes.
+- Keep ownership boundaries; route shared contract/root-build changes through Session 1.
+- Keep fixture/readiness labels honest. APK compilation is not an inference test.
+- No clinical claims, fabricated facts, hidden remote inference, or private-data export.
+- Prioritize real native tool calling, local ASR, and recovery before polish.
+- No unrelated integrations, email, bookings, payments, or automatic clinical referrals.
+- Record actual native acceptance results under android/docs/, including failures; never replace a failed hardware gate with a mocked pass.
+- Handoff: files, checks, exact hardware/runtime, limits, and dependencies.
 
-**User command:** `Run Session 3`
+## 10. Acceptance gates — definition of done
 
-**Codex instruction:**
+Every Android gate starts as **NOT RUN** for this revision. Legacy desktop tests cannot satisfy it.
 
-> You are Session 3 of the ClearLine build. Read `ClearLine_Fixed_Build_Spec.md` completely before editing. Implement the sponsor integrations and long-horizon Liquid agent loop. Do not redesign the frontend or backend routes. Integrate against Session 2's storage/job interfaces.
->
-> Your ownership is `backend/agent/`, `backend/integrations/`, sponsor smoke tests, and `.env.example`. You may make the smallest necessary interface hookup outside those directories only if Session 2 explicitly left an integration seam; document every such change. Do not rewrite Session 2's API/state machine.
->
-> Liquid AI: use the local llama.cpp `llama-server` path from Section 2, defaulting to `http://127.0.0.1:8080/v1` and model alias `clearline-liquid` unless the environment overrides them. No sponsor Liquid API key is required for this local path. Implement a real structured tool-call loop. First implement and run the `echo_nonce` smoke test: the model must request the tool, the application executes it, returns a nonce unknown to the original prompt, and the model must use the returned result in a second turn. Chat-only success does not count. Never `eval`/`exec` model output. If structured tool parsing fails, surface `agent_unavailable`; do not silently substitute deterministic Python while claiming Liquid succeeded.
->
-> RawTree: use the actual documented API, not legacy Tinybird endpoints. Use `POST {RAWTREE_BASE_URL}/v1/tables/{table}` for inserts and `POST {RAWTREE_BASE_URL}/v1/query` for read-only queries, with `Authorization: Bearer <key>` and `x-rawtree-database`. Implement bounded application operations such as `append_event`, `read_baseline`, `read_latest_checkpoint`, and `read_evidence_version`; do not expose arbitrary SQL to the model. Treat RawTree as event/evidence history and analytics, not the transactional queue. Add deduplication keys/events so retries do not count twice in analytical results.
->
-> Nimble: implement runtime Search and Extract with the current documented endpoints. Search returns candidate sources; Extract verifies a selected public page. Preserve `title`, `url`, description, request/task IDs where available, retrieval time, and source-backed facts. Missing values remain null. Never invent phone numbers, addresses, hours, availability, or fallback clinics. Restrict extraction to public HTTP(S) sources, reject localhost/private network targets, and treat fetched page text as untrusted evidence rather than instructions.
->
-> Agent tools must follow Section 7: `get_baseline_summary`, `compare_recording_metrics`, `search_public_resources`, `extract_public_page`, `request_user_input`, and `finish_task`. The controller enforces consent, valid state transitions, bounded arguments, action IDs, and deterministic validation. Liquid chooses among permitted tools, interprets failures, and decides whether to retry, inspect another source, or ask the user for missing input.
->
-> Context management is part of the deliverable. Build the prompt from the compact durable checkpoint, current goal, unresolved requirements, baseline/session references, recent action refs, and only relevant source excerpts. Do not inject the complete event history. Keep a tested bounded context and record actual usage if the runtime exposes it.
->
-> Implement sponsor smoke tests: (1) Liquid tool-call round trip; (2) RawTree insert one labeled synthetic event and query it back from the intended database; (3) Nimble Search plus one Extract with source-backed output. Clearly distinguish a missing credential/network failure from application success.
->
-> Implement or verify the live interruption demo path: after one sponsor tool result and checkpoint commit, terminate the backend process; restart it; call resume once; verify the next unfinished action runs without re-uploading the completed clip or rerunning committed actions.
->
-> Before finishing, run every sponsor smoke test for which credentials/services are actually available. Report: files changed, exact model/runtime used, which sponsor calls were real, smoke-test outputs at a high level without secrets, interrupt/resume result, and any blockers. Do not claim an integration passed if it was mocked.
+| Gate | Evidence required |
+| --- | --- |
+| Native build | Reproducible arm64 APK with pinned dependencies, installed/launched on actual S24. |
+| No laptop execution | Operates with laptop services stopped and USB disconnected after installation; no runtime pairing/localhost endpoint. |
+| Offline private core | Models installed, network off: real recording, local ASR, Liquid local tools, eligible local comparison, reopen/resume. Typed fixtures do not satisfy this. |
+| Liquid tools | Actual nonce round trip plus valid/invalid tool cases with the pinned in-process runtime/template. |
+| Audio | Real S24 speech, finalized PCM, local transcription, silence/truncation/permission/missing-model handling. |
+| Device/model limits | Measured load/turn time, tokens, memory, repeated runs, ASR/LFM coexistence, low storage, cancellation/unload. |
+| Local history | Eligible history works with export off; no/zero-variance cases; provenance separation; older follow-ups reopen. |
+| Observation/deduplication | Recomposition/Flow reads do not run tools; duplicate admission and repeated Resume preserve identities. |
+| Corrections | City edits invalidate research; transcript edits invalidate dependent metrics/comparison; stale in-flight results are rejected. |
+| Nimble | Approved real phone Search/Extract; descriptions/citations reach UI; unknowns stay unknown. |
+| RawTree | Approved phone write/readback to intended DB; replay deduplication; denied/revoked export stays blocked. |
+| Process death | Search commits before Extract; kill app, reopen/resume same session; accepted clip and completed Search IDs unchanged; then Extract. |
+| Unknown interrupted work | Kill during uncommitted work; retain logical identity and safely retry a read without exactly-once claims. |
+| Android lifecycle | Separate Activity recreation, backgrounding, process kill, force-stop/manual reopen; no onDestroy dependency. |
+| Privacy | Synthetic-canary network/log inspection: no audio/transcript/private context egress or inference HTTP; backup exclusions, credential protection, deletion/outbox cancellation. |
+| Context/evidence | Long history does not grow prompts unboundedly; page instructions cannot alter consent/tools; facts retain source version/passages. |
+| Failures/honesty | Offline external work waits visibly; 401/429/timeouts/bad JSON/missing keys fail honestly; fixtures/cached/live output remain distinct. |
 
-**Session 3 deliverable:** A real three-sponsor agent layer in which Liquid plans/tool-calls locally, RawTree stores/query approved event history, Nimble retrieves and verifies public sources, and the workflow can resume after interruption from compact state.
+For baseline demos, collect at least two eligible prior phone check-ins or show a separate labeled synthetic profile. Do not use synthetic history as the live speaker's baseline.
 
-### Coordination rules for all three Codex chats
+The interruption demo must preserve the phone DB. Reinstalling with data deletion is not recovery. A developer cable may send a test kill command, but processing stays on the phone; separately demonstrate cable-disconnected use.
 
-1. **Read this entire file first.** Do not rely on the old Claude planning document.
-2. **Inspect before editing.** Other sessions may already have created files. Preserve working code.
-3. **Stay in your ownership area.** Do not casually rewrite another session's implementation.
-4. **Shared API is frozen by Section 8.** If a mismatch is found, document it before changing both sides.
-5. **Do not fake sponsor success.** Fixture/demo mode must be visibly labeled.
-6. **Do not add clinical claims.** ClearLine compares descriptive check-in measurements and coordinates user-requested follow-up.
-7. **Do not expose secrets.** No API keys in frontend code, logs, commits, screenshots, or demo payloads.
-8. **Prefer a working end-to-end path over extra features.** Do not add BFL, email sending, bookings, payments, or unrelated integrations.
-9. **Commit/checkpoint your work cleanly** if the repository workflow supports it, so another session can inspect what changed.
-10. **Finish with a concise handoff:** changed files, tests run, known failures, and what the next session needs.
+## 11. Three-minute demonstration and pitch
 
-## 10. Acceptance gates — run before demo polish
+Prepare models and complete gates beforehand. Use measured device timings to determine whether the sequence fits three minutes. Label prerecorded fallbacks.
 
-1. **Liquid:** real local structured tool call, execution, and second model turn succeed; model alias matches served model.
-2. **RawTree:** insert one labeled synthetic event and retrieve it from the intended database with the actual credentials. Reject legacy endpoint usage.
-3. **Nimble:** live Search and one Extract succeed; the resulting card contains only source-backed fields. Report network failures honestly.
-4. **Phone:** actual S24 microphone works through the chosen origin; complete recording decodes on the laptop.
-5. **Polling:** repeated GET status calls do not increase tool executions, state versions, or event count.
-6. **Deduplication:** submitting the same clip twice and retrying an outbox event does not count it twice in session/baseline results.
-7. **Crash:** stop the backend after one tool result commits; restart with the same database; resume the next unfinished step without re-uploading completed input.
-8. **Correction:** changing the city invalidates only search-dependent work; changing a transcript invalidates dependent measurements/comparison.
-9. **Boundary cases:** silence, missing audio, no history, zero-variance baseline, stale source, missing source field, 401/429/timeouts, invalid model calls, and unavailable model are handled without invented output.
-10. **Privacy:** inspect outbound test payloads for transcript text, names, audio bytes, and secrets; reject disallowed exports.
-11. **Context:** a long synthetic event history does not cause the active prompt to grow with the complete timeline.
-12. **Honesty:** fixture data, cached evidence, consented live data, and fallback execution each have distinct visible labels.
+**0:00–0:25 — Story and architecture.** “A check-in is only the beginning. The follow-up needs to survive the interruption.” Show the S24's loaded model identity.
 
-These are requirements to execute on the user's machine. They are not claims that credentialed services, model inference, or the S24 were tested while preparing this file.
+**0:25–1:00 — Offline core.** With network off, record a consenting clip, transcribe on the phone, and show a real local tool action/saved summary. Measurements are descriptive only.
 
-## 11. Three-minute demonstration
+**1:00–1:30 — Chosen external work.** Enable connectivity, approve category/city, and show the local model choosing Nimble Search. Separately approve a minimal RawTree export if demonstrating cloud events.
 
-**0:00–0:25 — Story.** “I check in with my parent, but the unfinished follow-up gets lost when life interrupts.” Show a demo persona and explicitly labeled synthetic history.
+**1:30–2:15 — Interruption.** After Search commits and before Extract, stop the app process. Reopen, tap Resume, and show unchanged accepted clip/completed Search with pending Extract.
 
-**0:25–0:55 — Phone input.** Record a normal consenting demonstration clip, or show a clearly labeled prerecorded backup. Do not act confused to simulate a disease. Show quality validation and descriptive measurements, with the synthetic baseline labeled.
+**2:15–2:45 — Evidence.** Show source-backed facts, description, retrieval time, and unknown fields. Voice/transcript stays local.
 
-**0:55–1:20 — User-directed action.** Request public caregiver-support resources in a chosen city. Show Liquid's actual named tool call, Nimble's live source result, and a saved RawTree event.
+**2:45–3:00 — Close.** “The agent brain runs locally on your phone. Your sensitive voice history never needs to be sent to a cloud model. When life interrupts, ClearLine keeps the next step ready.”
 
-**1:20–2:00 — Real interruption.** After the search result/checkpoint commits and before the next extract step, terminate the backend process. The phone shows disconnected. Restart on the same laptop and resume the same session. Show the restored pending step and unchanged accepted clip ID.
+Longer pitch: “ClearLine helps families carry a check-in through to a useful next step. A short recording is processed on the phone, where a Liquid agent maintains the relevant history and unfinished work. When you ask for outside support, it searches public sources and keeps the evidence. When you pause or the app stops, it resumes from a local checkpoint. You choose what, if anything, is exported.”
 
-**2:00–2:35 — Verification and correction.** Extract the selected official page; show cited known fields and any remaining unknown. If using a deterministic changed-page fixture, label it a simulated source update rather than implying an official site changed live.
+## 12. Native configuration and status
 
-**2:35–3:00 — Architecture.** Show event-history size, bounded active context with its actual measurement label, completed/pending action counts, and source provenance. “The agent carries forward the verified state and unfinished work, not every prior conversation.”
+The Android target has no runtime Python environment, FastAPI server, Liquid base URL, model-server alias, or laptop pairing code.
 
-The full build-cycle mapping is: **specify** the user's check-in/follow-up goal; **execute** capture, comparison, and research; **verify** input and source evidence; **iterate** on missing input, changed constraints, and failed tools. This is a proposed fit to the supplied hackathon brief, not a guarantee of judges' interpretation.
+Record application ID, supported SDK range, tested target SDK/device OS, ABI, Gradle/Kotlin/NDK/CMake versions, pinned llama.cpp/whisper.cpp commits, and licenses/notices. Choose compatible versions using the actual bootstrap build and verify native packaging on-device.
 
-## 12. Configuration
+Model manifests contain repository, immutable revision, filename, size/digest, model type, quantization, template/tokenizer identity, language scope, and license reference. Download/import is a setup step; offline readiness requires every artifact to verify.
 
-Use the included `.env.example`. Never commit filled credentials. `LIQUID_BASE_URL` is local; its presence does not imply cloud hosting. `LIQUID_MODEL` is the server alias. `RAWTREE_API_KEY` and `NIMBLE_API_KEY` are the two external service secrets required for this architecture. A RawTree database must exist or be selected from the account's available/default database.
+Settings include local model selection, optional sponsor enablement/credentials, RawTree database, and per-session export choices. Sponsor endpoints are allowlisted; credentials stay in the vault. Never copy .env into Android assets or BuildConfig.
 
-Do not start all three implementation lanes until the shared schema and the three sponsor smoke-test contracts are understood. Prioritize the local tool round-trip and actual phone recording before aesthetic work.
-
-## Sources
-
-Source-derived capability/API statements are cited above. The workflow, safety gates, schema, limits, file ownership, and tests are proposed engineering decisions, not sponsor requirements.
-
-- **S1** Liquid model library and 2.6B model: https://docs.liquid.ai/lfm/models/complete-library ; https://docs.liquid.ai/lfm/models/lfm25-2.6b
-- **S2** Official GGUF model card: https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF
-- **S3** Local serving: https://docs.liquid.ai/deployment/on-device/llama-cpp
-- **S4** Mobile/deprecations: https://docs.liquid.ai/deployment/on-device/llama-cpp/mobile ; https://docs.liquid.ai/lfm/help/deprecations
-- **S5** Nimble Search contract: https://docs.nimbleway.com/api-reference/search/search
-- **S6** Nimble Extract contract: https://docs.nimbleway.com/api-reference/extract/extract
-- **S7** Nimble Python SDK: https://docs.nimbleway.com/nimble-sdk/sdks/python
-- **S8** Chrome port forwarding: https://developer.chrome.com/docs/devtools/remote-debugging/local-server
-- **S9** Recording timing: https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder/dataavailable_event
-- **S10** Microphone secure context: https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia
-- **S11** RawTree API: https://rawtree.com/docs/reference/api ; https://rawtree.com/docs/quickstart/api
-- **S12** Original emotion model's task/data: https://huggingface.co/ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition
-- **S13** Complete recording semantics: https://www.w3.org/TR/mediastream-recording/
-- **S14** llama-server options: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
-- **S15** RawTree SQL: https://rawtree.com/docs/guides/query-data
-- **S16** RawTree auth: https://rawtree.com/docs/reference/authentication
-- **S17** Nimble Extract guide: https://docs.nimbleway.com/nimble-sdk/web-tools/extract/quickstart
-- **S18** Nimble Node SDK: https://docs.nimbleway.com/nimble-sdk/sdks/node
-- **S19** Nimble development plugin: https://docs.nimbleway.com/integrations/agent-skills/plugin-installation
-- **S20** Nimble cookbooks: https://www.nimbleway.com/cookbooks
-- **S21** Liquid tool use: https://docs.liquid.ai/lfm/key-concepts/tool-use
+After gates pass, write android/docs/ACCEPTANCE.md with actual evidence and measured limitations. Until then, this is a native implementation in progress. Rewriting this specification neither installs Liquid nor completes the Android migration.
