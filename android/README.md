@@ -7,10 +7,12 @@ Session 1 supplies the Compose application, microphone/Whisper module, shared co
 and transactional Room store. Session 2 supplies the embedded Liquid runtime and workflow
 coordinator. Session 3 supplies the optional encrypted sponsor connections.
 
-**Current verification:** the full Android debug APK built successfully on September 25,
-2026, with all 170 module unit tests passing. APK signing, arm64 packaging, and 16 KiB
-native alignment checks passed. Phone installation and S24 acceptance are still untested.
-See [APK build evidence](docs/APK_BUILD.md) and [the phone setup guide](docs/PHONE_TESTING.md).
+**Current verification:** Android debug version **0.1.1** (version code 2) built successfully
+on September 25, 2026, with all **174** module unit tests passing. APK signing, arm64
+packaging, and 16 KiB native alignment checks passed. Live host probes verified Nimble
+Search/Extract and isolated synthetic RawTree event/memory readback. Phone installation
+and S24 acceptance are still untested. See [APK build evidence](docs/APK_BUILD.md),
+[live sponsor checks](docs/SPONSOR_LIVE_CHECKS.md), and [the phone setup guide](docs/PHONE_TESTING.md).
 
 ## Build and run
 
@@ -33,8 +35,10 @@ No Liquid API key or laptop server is used.
 
 On this Mac, the SDK, Gradle cache and build outputs live on the T7 SSD. Follow the
 [T7 mount and source-sync instructions](docs/TOOLCHAIN.md) before rebuilding there.
-The shareable debug APK is `/Volumes/T7/ClearLine-build/share/ClearLine-0.1-native-debug.apk`.
+The shareable debug APK is `/Volumes/T7/ClearLine-build/share/ClearLine-0.1.1-native-debug.apk`.
 A phone tester only needs that APK and the setup instructions; they do not build the project.
+Install it over version 0.1 as an update: the package and signing certificate are unchanged,
+so installed models and saved history are retained. Do not uninstall or clear app storage.
 
 ## App flow
 

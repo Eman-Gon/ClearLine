@@ -125,6 +125,15 @@ class SponsorLiveSmokeTest {
         assertFalse(fixture.matches(snapshot.copy(meanRecordingWpm = 125.0)))
         assertFalse(fixture.matches(snapshot.copy(currentSession = null)))
         assertFalse(fixture.matches(snapshot.copy(cached = true)))
+        val diagnostics = memorySmokeDiagnostics(snapshot.copy(currentSession = snapshot.currentSession!!.copy(
+            transcriptSnippet = "private transcript text", topKeyword = "private")))
+        assertTrue(diagnostics.contains("status=AVAILABLE"))
+        assertTrue(diagnostics.contains("dataPointCount=3"))
+        assertTrue(diagnostics.contains("priorRows=2"))
+        assertTrue(diagnostics.contains("currentPresent=true"))
+        assertFalse(diagnostics.contains("private"))
+        assertFalse(diagnostics.contains(fixture.profile.value))
+        assertFalse(diagnostics.contains(fixture.replay.sessionId.value))
     }
 
     @Test fun shapeDiagnosticsIncludeOnlyKnownFieldLengths() {

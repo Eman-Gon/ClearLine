@@ -47,8 +47,9 @@ define the final integration API.
 | App dispatch authorization | 8 host tests passed | Read-only proxy store; no sponsor network traffic |
 | Room generation and transactions | 16 tests passed with actual Room 2.7.1 KSP generation and Robolectric | Host SQLite, not a killed phone process |
 | Agent/inference and sponsors | Separate session reports in their module READMEs | Doubles/host probes are explicitly identified there |
-| UI instrumentation | Written for observation, exact search approval and snippet approval | Not run; Android build/device required |
-| Full Android APK | Debug APK built; all 170 module unit tests passed; signing, native exports, ABI and 16 KiB alignment passed | Host build/package verification; no phone runtime test. See [build record](APK_BUILD.md) |
+| UI instrumentation | Written for observation, exact search approval and snippet approval | Not run; a device is required |
+| Full Android APK | Version 0.1.1, version code 2 built; all 174 module unit tests passed; signing, native exports, ABI and 16 KiB alignment passed | Host build/package verification; no phone runtime test. See [build record](APK_BUILD.md) |
+| Live sponsor adapters | Nimble returned 3 candidates and 1 extracted passage; RawTree event exact readback passed, and memory returned 3 logical sessions after 4 write requests with 2 prior calls/current matched | Host HTTPS using synthetic fixtures; no phone or real transcript test. See [live sponsor checks](SPONSOR_LIVE_CHECKS.md) |
 | S24 acceptance | Not run | No S24 attached to adb |
 
 Focused app authorization tests and Room checks are reproducible through the checked-in
@@ -97,3 +98,12 @@ external volume, along with APK signing and native packaging checks. No physical
 was connected, so installation and device acceptance remain **NOT RUN**. The user's
 friend can install the provided APK using the [phone guide](PHONE_TESTING.md), without
 building it. The [toolchain guide](TOOLCHAIN.md) gives the storage layout and rebuild commands.
+
+The current artifact is `/Volumes/T7/ClearLine-build/share/ClearLine-0.1.1-native-debug.apk`
+(version code 2; 25,347,856 bytes), SHA-256
+`fb53f42ff1613aff1416e92dd7b7596d7c106ee831da9d48b9a0936f3324dc01`.
+All 174 module unit tests passed with no failures, errors or skips. The package and
+signing certificate match version 0.1; installing this APK as an update retains models
+and history. Do not uninstall or clear storage. The [live sponsor checks](SPONSOR_LIVE_CHECKS.md)
+cover the two provider compatibility fixes included in this build; they do not replace
+the phone acceptance steps above.

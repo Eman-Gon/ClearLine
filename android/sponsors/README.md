@@ -18,7 +18,7 @@ An in-memory credential version check blocks a pending request if its key is cle
 
 Search posts the exact approved query to `https://sdk.nimbleway.com/v2/search`. Only query, country and bounded result/content options leave the phone. Transcript rationale and full transcript remain local. Legacy category requests use a bounded fallback phrase; an approved transcript-shaped query is never replaced with that phrase.
 
-Extract uses `/v2/extract` only for a selected result of that approved search. Titles, descriptions, vendor request/task IDs, retrieval times, normalized source URL, content hash and exact supporting passages are preserved. Missing phone/address/hours remain null. A task ID without completed content is not evidence. Returned pages are untrusted text and cannot grant consent or trigger tools.
+Extract uses `/v2/extract` only for a selected result of that approved search. Titles, bounded description previews, vendor request/task IDs, retrieval times, normalized source URL, content hash and exact supporting passages are preserved. Search descriptions are capped at 4,000 characters because live responses can contain longer page excerpts even with `full_content=false`; identity/URL and extracted-evidence limits remain strict. Missing phone/address/hours remain null. A task ID without completed content is not evidence. Returned pages are untrusted text and cannot grant consent or trigger tools.
 
 Source checks reject unsupported schemes, userinfo, local/private/reserved addresses and disallowed redirects. Phone DNS validation cannot pin the remote Nimble resolver or prove its redirect policy; returned target URLs are checked again. The HTTP transport itself uses only fixed sponsor HTTPS origins, disables redirects and automatic connection retries, bounds request/response sizes, and never logs raw response bodies or credentials. Errors are typed and redacted.
 
@@ -49,6 +49,12 @@ adb devices -l
 
 ## S24 live acceptance (not yet run)
 
+The separate [host live checks](../docs/SPONSOR_LIVE_CHECKS.md) subsequently passed
+Nimble Search/Extract, RawTree exact event readback and a synthetic cloud baseline.
+The full Android build now passes 174 tests, including 48 sponsor tests. These host
+results do not establish the phone gates below. The reusable, opt-in
+[probe harness](tools/live-smoke/README.md) documents its exact test writes.
+
 These checks require the installed app, an attached authorized S24, owner-entered credentials, and the indicated approvals. Creating synthetic test content does not authorize its export. Use the production UI/coordinator and ports; do not add an authorization bypass or automatic startup probe.
 
 1. Verify offline local recording, summary/history and resume while both sponsor toggles are off. Opening summaries and diagnostics must not make network requests.
@@ -59,4 +65,6 @@ These checks require the installed app, an attached authorized S24, owner-entere
 6. With individually approved synthetic summaries, verify known distinct sessions, replayed export IDs and a corrected summary revision. Counts must remain stable for corrections/retries. The cloud baseline uses up to eight latest eligible prior sessions in the preceding 56 days, with real session chronology, at least two eligible rows, and current session excluded. Show provider-wide counts separately from the bounded baseline sample, plus actual dates, latency and retrieval/cache state.
 7. Clear or replace a key and disable/change the sponsor destination while a request is waiting for authorization; verify the pending dispatch fails. Interrupt an in-flight operation and verify cancellation, persisted local recovery and redacted errors. Do not claim a sent request was recalled.
 
-No live sponsor write, phone Search/Extract, Android framework compilation or S24 execution has been verified by the host test suite. RawTree's desktop metadata-only API check is documented separately and does not satisfy these phone gates.
+The mock host test suite does not establish live sponsor behavior. The later
+Android APK build and separate credentialed host probes are recorded above; phone
+Search/Extract, Android Keystore and S24 execution remain unverified.

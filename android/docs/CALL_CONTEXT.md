@@ -25,6 +25,10 @@ Optional snippets are limited to 200 characters and keywords to 40. They need se
 
 ## Verification
 
+The [later live sponsor checks](SPONSOR_LIVE_CHECKS.md) verified the actual query
+builder's synthetic-topic Nimble Search/Extract and an isolated RawTree cloud
+baseline with correct logical replay counts. Phone execution remains pending.
+
 Core tests cover distinct queries from distinct transcripts, common negations, explicit fallback, bounded local excerpts, zero-baseline handling, correction fingerprints, history eligibility, deduplication, origin separation, missing counts, and serialization. Sponsor tests use intercepted requests and controlled responses; these are not live service acceptance.
 
 On September 25, 2026, the consolidated JVM core suite passed 24 tests: 7 query-builder, 12 RawTree-memory, and 5 existing contract tests. The memory suite includes conflicting equal-version payloads and stable averaging of extreme finite inputs. Reproduce from `android/` with the JDK/Gradle toolchain documented in `TOOLCHAIN.md`:

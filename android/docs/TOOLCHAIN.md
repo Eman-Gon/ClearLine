@@ -41,6 +41,7 @@ The user requested that the build use the external T7 SSD. T7 uses exFAT, so an 
 | JDK, SDK, Gradle, downloads, and Gradle cache | `/Volumes/ClearLineBuild/toolchain` |
 | Android build copy and generated outputs | `/Volumes/ClearLineBuild/project/android` |
 | Authoritative working source | `/Users/emanschool/ClearLine/android` |
+| Current shareable APK | `/Volumes/T7/ClearLine-build/share/ClearLine-0.1.1-native-debug.apk` |
 
 Keep T7 connected and the APFS volume mounted while using the build tools or running a build. Stop Gradle and other processes using the volume before ejecting it. The SDK installation and accepted license receipt are retained within the persistent toolchain; mounting the volume again does not require accepting the license again.
 
@@ -71,7 +72,18 @@ rsync -a --exclude '/.gradle/' --exclude '/.kotlin/' \
 
 The T7 migration completed on September 25, 2026. A checksum-based `rsync` dry run found no differences in the copied toolchain, and Java, CMake, Clang, AAPT2 and Gradle executed successfully from the external volume. Only after verification was the old internal toolchain removed and replaced with the compatibility symlink. Internal free space increased from approximately 1.5 GiB to 6.3 GiB at that point.
 
-The Android source build copy is on the external volume. The full Gradle build covering all seven modules' unit tests plus `:app:assembleDebug` completed successfully there: 170 tests passed with no failures or skips. APK signature, native exports, ABI and 16 KiB alignment checks also passed. See [APK build evidence](APK_BUILD.md). Phone installation and device tests remain unverified.
+The Android source build copy is on the external volume. The latest full Gradle build
+covering all seven modules' unit tests plus `:app:assembleDebug` completed successfully
+there for version **0.1.1**, version code **2**: **174 tests passed**, with no failures,
+errors or skips. APK signature, native exports, ABI and 16 KiB alignment checks also
+passed. See [APK build evidence](APK_BUILD.md) and [live sponsor checks](SPONSOR_LIVE_CHECKS.md).
+Phone installation and device tests remain unverified.
+
+The current APK is 25,347,856 bytes, SHA-256
+`fb53f42ff1613aff1416e92dd7b7596d7c106ee831da9d48b9a0936f3324dc01`.
+Its package and signing certificate match the original version 0.1 APK. Install it as
+an update to retain the phone's downloaded models and saved history; do not uninstall
+the existing app or clear its storage.
 
 ## Bootstrap evidence — September 25, 2026
 

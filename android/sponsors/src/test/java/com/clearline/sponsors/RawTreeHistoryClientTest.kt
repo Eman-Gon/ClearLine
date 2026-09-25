@@ -164,6 +164,34 @@ class RawTreeHistoryClientTest {
         assertEquals("Explicitly approved snippet", (selected.projection as ExportedHistoryProjection.Measurements).value.transcriptSnippet)
     }
 
+    @Test fun memoryAcceptsUnavailableMeasurementsOmittedByJsonStorage() {
+        val metrics = RecordingMetrics(20.0, 40, 120.0, .1, dataOrigin = DataOrigin.SYNTHETIC)
+        val input = event(projection = ExportProjection.Measurements(1, metrics, sessionCreatedAtMs = 10, completedAtMs = 30))
+        val encoded = RawTreeExportWire.encode(input)
+        val storedMetrics = JsonObject(encoded.getValue("metrics").jsonObject.filterKeys { it !in setOf("pause_count", "pitch_mean_hz") })
+        val stored = JsonObject(encoded + ("metrics" to storedMetrics))
+        val query = MemoryQuery(input.profileId, SessionId.new(), input.dataOrigin, RecordingTask.CHECK_IN, metrics.measurementVersion, metrics.lexicalVersion, 1000)
+        val result = RawTreeExportWire.decodeMemory(buildJsonObject { put("payload", stored) }, query)
+        assertEquals(metrics, result.metrics)
+        assertNull(result.metrics.pauseCount)
+        assertNull(result.metrics.pitchMeanHz)
+        assertEquals(10L, result.timestampMs)
+        assertEquals(30L, result.completedAtMs)
+    }
+
+    @Test fun unexpectedMeasuredPitchOrPausesStillRejectInsteadOfBecomingUnknown() = runTest {
+        val metrics = RecordingMetrics(20.0, 40, 120.0, .1, dataOrigin = DataOrigin.SYNTHETIC)
+        val input = event(projection = ExportProjection.Measurements(1, metrics))
+        val encoded = RawTreeExportWire.encode(input)
+        for (field in listOf("pause_count", "pitch_mean_hz")) {
+            val storedMetrics = JsonObject(encoded.getValue("metrics").jsonObject + (field to JsonPrimitive(0)))
+            val stored = JsonObject(encoded + ("metrics" to storedMetrics))
+            assertEquals(ErrorCode.BAD_RESPONSE, failure {
+                RawTreeExportWire.decode(buildJsonObject { put("payload", stored) }, BoundedHistoryQuery(input.sessionId, field = ExportField.MEASUREMENTS))
+            }.error.code)
+        }
+    }
+
     @Test fun memorySqlCountsSeparatelyAndSelectsLatestBeforeEligibilityAndLimit() {
         val query = MemoryQuery(ProfileId.new(), SessionId.new(), DataOrigin.SYNTHETIC, RecordingTask.CHECK_IN, "android-pcm-v1", "english-lexical-v1", MemoryQuery.WINDOW_DURATION_MS + 1000)
         val sql = RawTreeExportWire.memorySql(query)

@@ -61,15 +61,19 @@ printed so it can be identified. Re-running creates a new fixture.
 
 The separate `rawtree-memory` command writes three synthetic measurement
 summaries to `clearline_session_summaries` under a fresh isolated profile. It
-replays the current summary once with the same export ID, so there are four
-physical writes but exactly three logical sessions. No snippet, keyword or
+replays the current summary once with the same export ID, making four write
+requests with exactly three expected logical sessions. The probe does not
+assert a physical stored-row count. No snippet, keyword or
 transcript is included. Two prior calls have 140/120 recording wpm and 0.6/0.4
 energy RMS; the current call has 100 recording wpm and 0.2 energy RMS. The probe
 uses the real `.memory()` adapter and requires the exact two prior calls,
 current call, counts of three, and baseline means 130/0.5. It allows at most
 three memory attempts (each uses three fixed queries), all scoped to the fresh
 profile and synthetic provenance. There are no automatic write retries or
-deletions. Fixture IDs are printed before dispatch; the four writes remain.
+deletions. Fixture profile UUID/hash and session/export IDs are printed before
+dispatch so the synthetic run can be identified; its rows remain. A failed
+memory match logs typed status, counts, row counts, current-call presence and
+bounded diagnostic enums/timing, without response bodies or transcript text.
 
 `PASS` describes a real completed provider response. Local configuration only
 reports `PRESENT`, `MISSING` or `INVALID`, which does not authenticate a key.

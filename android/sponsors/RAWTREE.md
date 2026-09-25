@@ -37,6 +37,14 @@ Counts, previous rows, and the current row are separate reads, not a server tran
 
 ## Verification
 
+Subsequent [credentialed host verification](../docs/SPONSOR_LIVE_CHECKS.md) passed
+one synthetic event's exact readback, three logical summaries after one replay,
+two prior calls and the correct current call, and the expected cloud baseline.
+Live JSON storage omitted explicitly null pitch/pause fields; the decoder now
+treats missing and null as unmeasured while still rejecting numeric values.
+All data used fresh isolated synthetic identities. These tests used the real
+portable Android adapter and transport, not a physical phone.
+
 `RawTreeHistoryClientTest` exercises actual Kotlin adapter code with a mocked HTTP port: selected export fields, both provenance consent gates, dispatch-time revocation/destination changes, immutable snapshots, supported source facts, retry identity, bounded history, logical count templates, provider counts versus the small page, and missing chronology. The host JVM test harness does not test Android Keystore, APK installation, or S24 networking.
 
 The S24 still needs an explicitly approved synthetic event write followed by exact-ID readback from the intended database. No automatic smoke write runs at startup or in these tests.

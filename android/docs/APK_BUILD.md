@@ -1,5 +1,11 @@
 # Android APK build — September 25, 2026
 
+This records the initial **0.1-native** build. It is superseded by
+[0.1.1 and live sponsor verification](SPONSOR_LIVE_CHECKS.md), which fixes two
+provider compatibility issues and has 174 passing module tests. The original
+share APK below is retained; the Gradle `app-debug.apk` output now contains the
+latest build.
+
 The full debug APK build succeeded on the user-selected T7 SSD. All 170 unit tests
 passed, with zero failures, errors or skips. Installation, live model execution,
 recording and sponsor calls on a physical phone remain **NOT RUN**. The user's friend

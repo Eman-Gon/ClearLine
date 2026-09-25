@@ -319,7 +319,9 @@ ORDER BY session_created_at_ms DESC, session_ref ASC LIMIT ${query.limit}"""
             ExportField.MEASUREMENTS -> {
                 val raw = body.getValue("metrics").jsonObject
                 val metric = RecordingMetrics(raw.number("duration_s"), raw.int("word_count"), raw.number("recording_wpm"), raw.number("energy_rms"), quality = AudioQuality.valueOf(raw.string("quality").uppercase()), qualityReasons = raw.getValue("quality_reasons").jsonArray.map { it.jsonPrimitive.content }, dataOrigin = origin, measurementVersion = raw.string("measurement_version"), lexicalVersion = raw.string("lexical_version"))
-                require(raw["pause_count"] == JsonNull && raw["pitch_mean_hz"] == JsonNull)
+                // RawTree's JSON storage may omit explicitly null keys on readback.
+                // Missing and null both mean unmeasured; numeric values stay invalid.
+                require((raw["pause_count"] ?: JsonNull) == JsonNull && (raw["pitch_mean_hz"] ?: JsonNull) == JsonNull)
                 metrics(metric, origin)
                 // Snippets are revealed only through the separately authorized
                 // snippet query field; ordinary measurement reads redact them.
