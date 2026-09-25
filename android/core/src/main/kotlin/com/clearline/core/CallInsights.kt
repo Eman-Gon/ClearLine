@@ -33,11 +33,13 @@ import kotlinx.serialization.Serializable
     val category: ResourceCategory,
     val basis: QueryBasis,
     val transcriptHash: String,
+    val builderVersion: String = "transcript-topics-v1",
 ) {
     init {
         require(query.length in 1..400 && query == query.trim() && query.none { it.isISOControl() })
         require(city.length in 1..120 && city == city.trim() && city.none { it.isISOControl() })
         require(transcriptHash.matches(Regex("[0-9a-f]{64}")))
+        require(builderVersion == "transcript-topics-v1")
     }
 }
 
@@ -48,7 +50,7 @@ object CallInsights {
         Rule(CallConcern.WORD_FINDING, "word finding difficulty communication support", "word finding",
             Regex("\\b(?:trouble|difficulty|struggle|struggling)\\s+(?:(?:with|to)\\s+)?(?:finding|find|remembering|remember)\\s+(?:the\\s+|my\\s+)?words?\\b|\\b(?:can['’]?t|cannot)\\s+(?:find|remember)\\s+(?:the\\s+|my\\s+)?words?\\b", RegexOption.IGNORE_CASE)),
         Rule(CallConcern.MEMORY, "everyday forgetfulness memory support", "forgetting",
-            Regex("\\b(?:forgetting|forgetful|forgot)\\b|\\b(?:can['’]?t|cannot)\\s+remember\\b|\\b(?:memory\\s+(?:trouble|problems?|loss)|trouble\\s+remembering)\\b", RegexOption.IGNORE_CASE)),
+            Regex("\\b(?:forget|forgetting|forgetful|forgot)\\b|\\b(?:can['’]?t|cannot)\\s+remember\\b|\\b(?:memory\\s+(?:trouble|problems?|loss)|trouble\\s+remembering)\\b", RegexOption.IGNORE_CASE)),
         Rule(CallConcern.WORRY, "worry and emotional support", "worry",
             Regex("\\b(?:worried|worrying|anxious|afraid|fearful|sad)\\b", RegexOption.IGNORE_CASE)),
         Rule(CallConcern.LONELINESS, "loneliness social connection support", "loneliness",
@@ -124,7 +126,8 @@ object CallInsights {
     private fun negated(text: String, start: Int): Boolean {
         val prefix = text.substring(maxOf(0, start - 80), start)
             .split(Regex("[.!?;\\n]|\\b(?:but|however)\\b", RegexOption.IGNORE_CASE)).last()
-        return Regex("\\b(?:not|never|no|no longer|don['’]?t|doesn['’]?t|isn['’]?t|wasn['’]?t)\\s+(?:(?:really|very|feeling|having|any|much|that)\\s+){0,3}$", RegexOption.IGNORE_CASE).containsMatchIn(prefix)
+        val denialFillers = "really|very|feeling|having|have|feel|been|had|any|much|that|at|all|worried|worrying|anxious|afraid|fearful|sad|lonely|loneliness|isolated|forgetful|or|and"
+        return Regex("\\b(?:not|never|no|no longer|don['’]?t|doesn['’]?t|isn['’]?t|wasn['’]?t|aren['’]?t)\\s+(?:(?:$denialFillers)\\s+){0,8}$", RegexOption.IGNORE_CASE).containsMatchIn(prefix)
     }
 
     private fun excerpt(text: String, range: IntRange): String {

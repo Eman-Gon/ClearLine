@@ -10,7 +10,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.serialization.json.*
 
 /** CPU-only, in-process model owner. It has no inference networking client. */
 class EmbeddedLiquidRuntime(
@@ -23,17 +22,44 @@ class EmbeddedLiquidRuntime(
 ) : ModelRuntime, LocalGenerationEngine {
     private val mutableStatus = MutableStateFlow(ModelStatus(ModelKind.LIQUID))
     override val status: StateFlow<ModelStatus> = mutableStatus.asStateFlow()
-    private var bridge: NativeLiquidBridge? = null
-    private var handle = 0L
+    @Volatile private var bridge: NativeLiquidBridge? = null
+    @Volatile private var handle = 0L
     private val requestSequence = AtomicLong(0)
     private val activeRequest = AtomicLong(0)
     private val mutableTimings = MutableStateFlow<RuntimeTimings?>(null)
     val timings: StateFlow<RuntimeTimings?> = mutableTimings.asStateFlow()
 
+    /** Explicit startup verification only; collecting readiness never loads a model or uses network. */
+    suspend fun refreshInstalledStatus() = arbiter.withExclusiveModelUse {
+        withContext(Dispatchers.IO) {
+            if (status.value.phase == ModelPhase.READY) return@withContext
+            val identity = LiquidModelCatalog.DEFAULT
+            try {
+                val file = installer.verifiedFile(identity.modelId) { mutableStatus.value = it }
+                if (file == null) mutableStatus.value = ModelStatus(ModelKind.LIQUID, ModelPhase.MISSING)
+            } catch (cancelled: CancellationException) {
+                cancelledSetup("Local model verification was cancelled.")
+                throw cancelled
+            } catch (error: Throwable) {
+                val safe = (error as? ClearLineException)?.error
+                    ?: AppError(ErrorCode.MODEL_FAILED, "The installed Liquid model could not be verified.", true)
+                mutableStatus.value = ModelStatus(ModelKind.LIQUID, ModelPhase.FAILED, identity, error = safe)
+                throw ClearLineException(safe)
+            }
+        }
+    }
+
     override suspend fun install(artifact: ApprovedModelArtifact) = arbiter.withExclusiveModelUse {
-        if (status.value.phase == ModelPhase.READY) unloadLocked()
-        installer.install(artifact) { mutableStatus.value = it }
-        Unit
+        withContext(Dispatchers.IO) {
+            if (status.value.phase == ModelPhase.READY) unloadLocked()
+            try {
+                installer.install(artifact) { mutableStatus.value = it }
+            } catch (cancelled: CancellationException) {
+                cancelledSetup("Local model setup was cancelled.")
+                throw cancelled
+            }
+            Unit
+        }
     }
 
     override suspend fun load(modelId: ModelId) = arbiter.withExclusiveModelUse {
@@ -48,15 +74,22 @@ class EmbeddedLiquidRuntime(
                 mutableStatus.value = ModelStatus(ModelKind.LIQUID, ModelPhase.LOADING, identity)
                 if (bridge == null) {
                     NativeLiquidBridge.loadLibrary()
-                    bridge = NativeLiquidBridge()
-                    handle = bridge!!.nativeCreate()
+                    val createdBridge = NativeLiquidBridge()
+                    val createdHandle = createdBridge.nativeCreate()
+                    if (createdHandle <= 0) fail(ErrorCode.MODEL_FAILED, "The embedded Liquid runtime could not create a native context owner.")
+                    // Publish only after successful creation so a failed attempt can retry.
+                    handle = createdHandle
+                    bridge = createdBridge
                 }
                 val started = System.nanoTime()
                 bridge!!.nativeLoad(handle, file.canonicalPath.toByteArray(Charsets.UTF_8), 4096,
                     (Runtime.getRuntime().availableProcessors() - 2).coerceIn(1, 4))
                 mutableTimings.value = RuntimeTimings(coldLoadNanos = System.nanoTime() - started)
                 mutableStatus.value = ModelStatus(ModelKind.LIQUID, ModelPhase.READY, identity)
-            } catch (cancelled: CancellationException) { throw cancelled }
+            } catch (cancelled: CancellationException) {
+                cancelledSetup("Local model loading was cancelled.")
+                throw cancelled
+            }
             catch (error: Throwable) {
                 val safe = (error as? ClearLineException)?.error ?: AppError(ErrorCode.MODEL_FAILED, "The embedded Liquid runtime could not load. Check the native library and verified model.")
                 mutableStatus.value = ModelStatus(ModelKind.LIQUID, ModelPhase.FAILED, identity, error = safe)
@@ -68,11 +101,14 @@ class EmbeddedLiquidRuntime(
     override suspend fun unload() = arbiter.withExclusiveModelUse { withContext(Dispatchers.IO) { unloadLocked() } }
 
     private fun unloadLocked() {
+        val previous = status.value
         if (handle != 0L) {
-            mutableStatus.value = status.value.copy(phase = ModelPhase.UNLOADING)
+            mutableStatus.value = previous.copy(phase = ModelPhase.UNLOADING)
             bridge?.nativeUnload(handle)
         }
-        mutableStatus.value = ModelStatus(ModelKind.LIQUID, if (status.value.identity == null) ModelPhase.MISSING else ModelPhase.INSTALLED, status.value.identity)
+        // A failed/missing artifact is not installed merely because its expected
+        // identity is known. Only a previously ready model becomes installed.
+        mutableStatus.value = if (previous.phase == ModelPhase.READY) previous.copy(phase = ModelPhase.INSTALLED) else previous
     }
 
     suspend fun close() = arbiter.withExclusiveModelUse {
@@ -119,7 +155,17 @@ class EmbeddedLiquidRuntime(
 
     override fun cancel() {
         val request = activeRequest.get()
-        if (request > 0 && handle != 0L) bridge?.nativeCancel(handle, request)
+        if (request <= 0) return
+        val native = bridge ?: return
+        val currentHandle = handle
+        if (currentHandle <= 0) return
+        try {
+            native.nativeCancel(currentHandle, request)
+        } catch (_: IllegalStateException) {
+            // Generation may finish and close may destroy the handle between the
+            // atomic request read and JNI. Its stale-handle rejection is harmless;
+            // lifecycle cancellation must not throw on the foreground thread.
+        }
     }
 
     private fun requireReady(): NativeLiquidBridge {
@@ -134,6 +180,10 @@ class EmbeddedLiquidRuntime(
     }
 
     private fun fail(code: ErrorCode, message: String): Nothing = throw ClearLineException(AppError(code, message))
+
+    private fun cancelledSetup(message: String) {
+        mutableStatus.value = status.value.copy(phase = ModelPhase.FAILED, error = AppError(ErrorCode.CANCELLED, message, true))
+    }
 }
 
 /** Only values actually measured by this runtime are populated. No S24 guesses. */

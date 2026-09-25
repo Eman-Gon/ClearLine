@@ -6,6 +6,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
@@ -26,6 +27,7 @@ class OnDeviceCoordinator(
     private val commands = Mutex()
     private val execution = Mutex()
     private val active = ConcurrentHashMap<SessionId, Job>()
+    private val memoryWork = ConcurrentHashMap<SessionId, Deferred<Unit>>()
     @Volatile private var foreground = false
     @Volatile private var executingSession: SessionId? = null
     private var initialized = false
@@ -39,15 +41,18 @@ class OnDeviceCoordinator(
     }
 
     fun onForeground() { foreground = true }
+    /** Synchronous lifecycle boundary; persistence/cancellation then drains in onBackground. */
+    fun markBackground() { foreground = false }
 
     suspend fun onBackground() {
-        foreground = false
-        active.keys.toList().forEach { pause(it) }
+        markBackground()
+        (active.keys + memoryWork.keys).toSet().forEach { pause(it) }
     }
 
     suspend fun close() {
         onBackground()
         active.values.toList().joinAll()
+        memoryWork.values.toList().joinAll()
     }
 
     override suspend fun createSession(input: CreateSession): SessionId = commands.withLock {
@@ -66,6 +71,10 @@ class OnDeviceCoordinator(
     override suspend fun acceptClip(input: CompletedLocalClip): ClipReceipt {
         val receipt = commands.withLock {
             val current = session(input.sessionId)
+            current.clips.firstOrNull { it.clip.clipId == input.clipId }?.let { prior ->
+                requireInput(prior.clip.sha256 == input.sha256, "This clip identity already belongs to other content.")
+                return@withLock prior.receipt.copy(duplicate = true)
+            }
             requireInput(current.consent.recording && current.dataOrigin == input.dataOrigin, "Recording approval or provenance does not match.")
             requireInput(current.clips.size < 20 || current.clips.any { it.clip.clipId == input.clipId }, "This check-in has reached its clip limit.")
             // The phone-private completed WAV is rechecked before transactional admission.
@@ -104,8 +113,13 @@ class OnDeviceCoordinator(
             requireRevision(old, input.inputRevision)
             requireInput(input.approvedAtMs > 0, "Approve the public request preview first.")
             val revision = old.inputRevision + 1
-            val next = changed(old).copy(inputRevision = revision, researchRevision = revision,
-                approvedResources = input.copy(inputRevision = revision), resources = emptyList(), sources = emptyList(),
+            val researchRevision = old.researchRevision + 1
+            input.queryDraft?.let { draft ->
+                requireInput(draft.transcriptHash == CallInsights.transcriptHash(CallInsights.transcriptFor(old)) && draft.city == input.city && draft.category == input.category, "Review the current transcript-derived search preview.")
+                requireInput(draft == CallInsights.buildQuery(CallInsights.transcriptFor(old), input.city, input.category, old.comparison).copy(query = draft.query), "Review the current query rationale before approving the exact edited query.")
+            }
+            val next = changed(old).copy(inputRevision = revision, researchRevision = researchRevision,
+                approvedResources = input.copy(inputRevision = researchRevision), resources = emptyList(), sources = emptyList(),
                 pendingInput = null, pendingAction = null, errors = emptyList(),
                 phase = if (old.phase == Phase.PAUSED) Phase.PAUSED else Phase.RESEARCHING)
             save(old, next, WorkflowScope.RESEARCH, listOf(workflowJob(next, WorkflowScope.RESEARCH)), invalidate = setOf(WorkflowScope.RESEARCH))
@@ -123,11 +137,12 @@ class OnDeviceCoordinator(
                         ?: fail(ErrorCode.INVALID_INPUT, "Choose a completed recording to correct.")
                     val revision = old.inputRevision + 1
                     val corrected = clip.copy(result = LocalMeasurements.correct(clip.result!!, change.transcript, now()))
-                    var next = changed(old).copy(inputRevision = revision, comparisonRevision = revision,
+                    var next = changed(old).copy(inputRevision = revision, comparisonRevision = old.comparisonRevision + 1,
                         clips = old.clips.map { if (it.clip.clipId == change.clipId) corrected else it }, comparison = null,
                         summaryVersion = old.summaryVersion + 1, pendingInput = null, pendingAction = null, errors = emptyList(),
                         // A transcript-derived public query must be previewed and approved again.
-                        researchRevision = revision, approvedResources = null, resources = emptyList(), sources = emptyList(),
+                        researchRevision = old.researchRevision + 1, approvedResources = null, resources = emptyList(), sources = emptyList(),
+                        consent = withoutReviewedText(old.consent), rawTreeMemory = null,
                         phase = if (old.phase == Phase.PAUSED) Phase.PAUSED else Phase.COMPARING)
                     next = next.copy(metrics = LocalMeasurements.aggregate(accepted(next)))
                     save(old, next, WorkflowScope.COMPARISON, listOf(workflowJob(next, WorkflowScope.COMPARISON)),
@@ -137,7 +152,8 @@ class OnDeviceCoordinator(
                     requireInput(old.pendingInput != null, "No question is currently awaiting an answer.")
                     val prior = store.getCheckpoint(old.sessionId)
                     val workflowScope = prior?.workflowScope ?: WorkflowScope.COMPARISON
-                    val next = changed(old).copy(pendingInput = null, errors = emptyList(),
+                    requireInput(old.activeActions(workflowScope).size < 12, "The action budget is exhausted. Correct the transcript or approve a new resource request.")
+                    val next = changed(old).copy(inputRevision = old.inputRevision + 1, pendingInput = null, errors = emptyList(),
                         phase = if (old.phase == Phase.PAUSED) Phase.PAUSED else phase(workflowScope))
                     val base = checkpoint(next, workflowScope, prior)
                     val userMessage = ChatMessage(ChatRole.USER, safeJson(Json.encodeToString(change.text)))
@@ -153,20 +169,21 @@ class OnDeviceCoordinator(
         commands.withLock {
             val old = store.getSession(sessionId) ?: return@withLock
             if (old.phase == Phase.PAUSED && !old.pauseRequested) return@withLock
-            val running = active[sessionId]?.isActive == true
+            val running = active[sessionId]?.isCompleted == false
             val next = changed(old).copy(pauseRequested = running, phase = if (running) old.phase else Phase.PAUSED)
             val prior = store.getCheckpoint(sessionId)
             save(old, next, prior?.workflowScope ?: WorkflowScope.COMPARISON)
         }
         if (executingSession == sessionId) { cancelInference(); cancelAudio() }
-        active[sessionId]?.cancel()
+        active[sessionId]?.cancelAndJoin()
+        memoryWork[sessionId]?.cancelAndJoin()
         settlePause(sessionId)
     }
 
     override suspend fun resume(sessionId: SessionId) {
         commands.withLock {
             val old = session(sessionId)
-            if (active[sessionId]?.isActive == true) return@withLock
+            if (active[sessionId]?.isCompleted == false) return@withLock
             requireInput(foreground, "Open the app before resuming local work.")
             if (old.phase == Phase.READY || old.phase == Phase.AWAITING_USER_CHOICE || old.phase == Phase.RECORDING) return@withLock
             if (old.pendingInput != null && old.errors.none { it.code in setOf(ErrorCode.MISSING_MODEL, ErrorCode.MODEL_FAILED) }) return@withLock
@@ -179,16 +196,68 @@ class OnDeviceCoordinator(
         launchSession(sessionId)
     }
 
-    override suspend fun setExportConsent(input: ExportConsentChange) = commands.withLock {
+    override suspend fun setExportConsent(input: ExportConsentChange) {
+      commands.withLock {
         val old = session(input.sessionId)
         requireInput(old.consent.exportRevision == input.expectedConsentRevision, "Export approval changed; review it again.")
-        // Revocation transaction cancels all outstanding old projections. New approval never backfills.
+        val textSelected = ExportField.TRANSCRIPT_SNIPPET in input.selectedFields
+        requireInput(!textSelected || ExportField.MEASUREMENTS in input.selectedFields, "Select measurements with the reviewed text export.")
+        requireInput(textSelected || (input.reviewedTranscriptSnippet == null && input.reviewedKeyword == null), "Select text export before approving snippet or keyword fields.")
+        requireInput(listOfNotNull(input.reviewedTranscriptSnippet, input.reviewedKeyword).all { it.isNotBlank() && it.none(Char::isISOControl) }, "Review a nonempty snippet and keyword without control characters, or omit them.")
+        requireInput(!textSelected || CallInsights.transcriptFor(old).isNotBlank(), "Accepted transcript text is required before reviewing a text export.")
+        val currentSummary = if (ExportField.MEASUREMENTS in input.selectedFields) store.observeHistory(old.profileId).first()
+            .firstOrNull { it.sessionId == old.sessionId && it.version == old.summaryVersion && it.metrics == old.metrics } else null
+        // Cancel old projections; this explicit approval may export only the displayed current summary.
         val revoked = store.revokeExportConsent(old.sessionId, input.expectedConsentRevision, now())
         if (input.selectedFields.isNotEmpty()) {
-            val next = changed(revoked).copy(consent = revoked.consent.copy(exportFields = input.selectedFields, updatedAtMs = now()))
-            save(revoked, next, store.getCheckpoint(old.sessionId)?.workflowScope ?: WorkflowScope.COMPARISON)
+            val next = changed(revoked).copy(consent = revoked.consent.copy(exportFields = input.selectedFields, exportRevision = revoked.consent.exportRevision + 1, updatedAtMs = now(),
+                reviewedTranscriptSnippet = input.reviewedTranscriptSnippet, reviewedKeyword = input.reviewedKeyword), rawTreeMemory = null)
+            save(revoked, next, store.getCheckpoint(old.sessionId)?.workflowScope ?: WorkflowScope.COMPARISON,
+                extraProjections = currentSummary?.let { listOf(measurementProjection(next, it)) } ?: emptyList())
         }
-        Unit
+      }
+      launchSession(input.sessionId)
+    }
+
+    override suspend fun refreshExportedMemory(sessionId: SessionId) {
+        val work = commands.withLock {
+            requireInput(foreground, "Open the app before refreshing exported history.")
+            memoryWork[sessionId]?.takeUnless { it.isCompleted } ?: scope.async(start = CoroutineStart.LAZY) {
+                execution.withLock {
+                    if (foreground) { flushOutbox(); refreshMemory(sessionId) }
+                }
+            }.also { memoryWork[sessionId] = it; it.start() }
+        }
+        try { work.await() }
+        catch (cancelled: CancellationException) { work.cancelAndJoin(); throw cancelled }
+        finally { memoryWork.remove(sessionId, work) }
+    }
+
+    private suspend fun refreshMemory(sessionId: SessionId) {
+        if (!foreground) return
+        val before = store.getSession(sessionId) ?: return
+        val metrics = before.metrics ?: return
+        val query = MemoryQuery(before.profileId, before.sessionId, before.dataOrigin, before.task,
+            metrics.measurementVersion, metrics.lexicalVersion, before.createdAtMs)
+        val remote = try { withTimeout(30_000) { history.memory(query) } }
+        catch (timeout: TimeoutCancellationException) { RawTreeMemoryMath.unavailable(query, now(), RawTreeMemoryDiagnostics(error = ErrorCode.TIMEOUT)) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Throwable) { RawTreeMemoryMath.unavailable(query, now(),
+            RawTreeMemoryDiagnostics(error = (error as? ClearLineException)?.error?.code ?: ErrorCode.UNAVAILABLE)) }
+        requireInput(remote.profileId == before.profileId && remote.currentSessionId == before.sessionId,
+            "Exported history response has the wrong identity.")
+        commands.withLock {
+            val old = store.getSession(sessionId) ?: return@withLock
+            if (!foreground || old.inputRevision != before.inputRevision || old.consent.exportRevision != before.consent.exportRevision) return@withLock
+            val projection = if (ExportField.TRANSCRIPT_SNIPPET in old.consent.exportFields) remote else remote.copy(
+                previousSessions = remote.previousSessions.map { it.copy(transcriptSnippet = null, topKeyword = null) },
+                currentSession = remote.currentSession?.copy(transcriptSnippet = null, topKeyword = null))
+            val next = changed(old).copy(rawTreeMemory = projection)
+            val prior = store.getCheckpoint(sessionId)
+            // This cache is optional evidence, never a replacement baseline/checkpoint.
+            store.applyCommand(CommandMutation(old.stateVersion, old.inputRevision, next,
+                checkpoint(next, prior?.workflowScope ?: WorkflowScope.COMPARISON, prior)))
+        }
     }
 
     override suspend fun deleteSession(sessionId: SessionId) {
@@ -197,19 +266,20 @@ class OnDeviceCoordinator(
     }
 
     override suspend fun deleteProfile(profileId: ProfileId) {
-        active.keys.filter { store.getSession(it)?.profileId == profileId }.forEach { stopSession(it) }
+        (active.keys + memoryWork.keys).filter { store.getSession(it)?.profileId == profileId }.forEach { stopSession(it) }
         commands.withLock { store.deleteProfile(profileId, now()); cleanupFiles() }
     }
 
     private suspend fun stopSession(id: SessionId) {
         if (executingSession == id) { cancelInference(); cancelAudio() }
         active[id]?.cancelAndJoin()
+        memoryWork[id]?.cancelAndJoin()
     }
 
     private fun launchSession(id: SessionId) {
         if (!foreground) return
         synchronized(active) {
-            if (active[id]?.isActive == true) return
+            if (active[id]?.isCompleted == false) return
             lateinit var job: Job
             job = scope.launch(start = CoroutineStart.LAZY) {
                 try { execution.withLock { executingSession = id; runSession(id) } }
@@ -227,15 +297,20 @@ class OnDeviceCoordinator(
         while (foreground && currentCoroutineContext().isActive) {
             val claim = commands.withLock {
                 val current = store.getSession(id) ?: return
-                if (current.phase in setOf(Phase.PAUSED, Phase.AWAITING_INPUT, Phase.AGENT_UNAVAILABLE, Phase.WAITING_NETWORK, Phase.WAITING_RETRY) || current.pauseRequested) return
+                if (current.phase in setOf(Phase.PAUSED, Phase.AWAITING_INPUT, Phase.AGENT_UNAVAILABLE, Phase.WAITING_NETWORK, Phase.WAITING_RETRY) || current.pauseRequested) return@withLock null
                 store.claimJob(id, now())
             } ?: break
             try {
                 if (claim.job.kind == JobKind.PROCESS_AUDIO) processAudio(claim) else processAction(claim)
+            } catch (timeout: TimeoutCancellationException) {
+                if (!claimIsCurrent(claim)) continue
+                recordFailure(claim, AppError(ErrorCode.TIMEOUT, "The operation timed out. Resume to retry with its saved identity.", true), Phase.WAITING_RETRY)
+                return
             } catch (cancelled: CancellationException) {
                 withContext(NonCancellable) { recordFailure(claim, AppError(ErrorCode.CANCELLED, "Work paused at a durable boundary.", true), Phase.PAUSED) }
                 throw cancelled
             } catch (error: Throwable) {
+                if (!claimIsCurrent(claim)) continue // Newer revision jobs remain eligible in this runner.
                 val safe = (error as? ClearLineException)?.error ?: AppError(ErrorCode.UNAVAILABLE, "The local step could not complete.")
                 val phase = when (safe.code) {
                     ErrorCode.NETWORK_UNAVAILABLE -> Phase.WAITING_NETWORK
@@ -248,12 +323,13 @@ class OnDeviceCoordinator(
             }
             flushOutbox()
         }
+        flushOutbox()
     }
 
     private suspend fun processAudio(claim: JobClaim) {
         val initial = session(claim.job.sessionId)
         val clip = initial.clips.find { it.clip.clipId == claim.job.clipId } ?: fail(ErrorCode.NOT_FOUND, "The queued recording was not found.")
-        val result = audio.process(clip.clip)
+        val result = withTimeout(120_000) { audio.process(clip.clip) }
         commands.withLock {
             val old = session(claim.job.sessionId)
             ensureCurrent(claim, old)
@@ -290,7 +366,7 @@ class OnDeviceCoordinator(
             val count = current.activeActions(claim.job.scope).size
             if (count >= 12) fail(ErrorCode.RETRY_EXHAUSTED, "The local action budget is exhausted. Refine the request.")
             val local = agent as? ToolCallingLocalAgent ?: fail(ErrorCode.AGENT_UNAVAILABLE, "A real tool-calling model adapter is required.")
-            val proposed = local.proposeTurn(checkpoint)
+            val proposed = withTimeout(120_000) { local.proposeTurn(checkpoint) }
             commands.withLock {
                 current = session(current.sessionId)
                 ensureCurrent(claim, current)
@@ -301,6 +377,10 @@ class OnDeviceCoordinator(
                     current.inputRevision, count + 1, proposed.action, proposed.assistantMessage.copy(toolCallId = callId),
                     callId, createdAtMs = now(), scope = claim.job.scope, scopeRevision = claim.job.scopeRevision))
             }
+        }
+        val recoveredPlan = plan!!
+        if (recoveredPlan.status == ActionStatus.UNKNOWN) commands.withLock {
+            plan = store.persistPlan(claim, recoveredPlan)
         }
         val action = plan!!
         current = session(current.sessionId)
@@ -327,12 +407,14 @@ class OnDeviceCoordinator(
                 is ActionResult.InputRequested -> next = next.copy(phase = Phase.AWAITING_INPUT, pendingInput = result.value)
                 ActionResult.Finished -> next = next.copy(phase = if (action.scope == WorkflowScope.RESEARCH) Phase.READY else Phase.AWAITING_USER_CHOICE)
             }
-            val finished = action.copy(status = ActionStatus.SUCCEEDED, result = result, completedAtMs = now())
-            next = next.copy(actions = (old.actions.filterNot { it.actionId == action.actionId } + finished).takeLast(144))
             val toolMessage = resultMessage(result, action.toolCallId)
+            val finished = action.copy(status = ActionStatus.SUCCEEDED, result = result, toolMessage = toolMessage, completedAtMs = now())
+            next = next.copy(actions = (old.actions.filterNot { it.actionId == action.actionId } + finished).takeLast(144))
+            val terminal = result is ActionResult.InputRequested || result == ActionResult.Finished
+            if (!terminal && next.activeActions(action.scope).size >= 12) next = budgetExhausted(next)
             val nextCheckpoint = checkpoint(next, action.scope).copy(exchanges = listOf(action.assistantMessage, toolMessage),
                 baseline = (result as? ActionResult.Baseline)?.value ?: checkpoint.baseline)
-            val jobs = if (result is ActionResult.InputRequested || result == ActionResult.Finished) emptyList() else listOf(workflowJob(next, action.scope))
+            val jobs = if (terminal || next.activeActions(action.scope).size >= 12) emptyList() else listOf(workflowJob(next, action.scope))
             val exports = if (result is ActionResult.Extract) listOf(ExportProjection.PublicResource(result.value)) else emptyList()
             val mutation = mutation(old, next, action.scope, jobs, checkpointOverride = nextCheckpoint, extraProjections = exports)
             store.commitSuccess(ActionSuccessCommit(claim, action.actionId, result, toolMessage, mutation, now()))
@@ -346,8 +428,8 @@ class OnDeviceCoordinator(
                 state.dataOrigin, metrics.measurementVersion, metrics.lexicalVersion, state.createdAtMs)))
         }
         ProposedAction.CompareRecordingMetrics -> ActionResult.Comparison(LocalMeasurements.compare(state.metrics!!, checkpoint.baseline!!))
-        ProposedAction.SearchPublicResources -> ActionResult.Search(resources.search(state.approvedResources!!))
-        is ProposedAction.ExtractPublicPage -> ActionResult.Extract(resources.extract(ApprovedSource(state.approvedResources!!, state.resources.first { it.candidateId == action.candidateId })))
+        ProposedAction.SearchPublicResources -> ActionResult.Search(withTimeout(45_000) { resources.search(state.approvedResources!!) })
+        is ProposedAction.ExtractPublicPage -> ActionResult.Extract(withTimeout(45_000) { resources.extract(ApprovedSource(state.approvedResources!!, state.resources.first { it.candidateId == action.candidateId })) })
         is ProposedAction.RequestUserInput -> ActionResult.InputRequested(action.input)
         ProposedAction.FinishTask -> ActionResult.Finished
     }
@@ -356,13 +438,24 @@ class OnDeviceCoordinator(
         val old = store.getSession(claim.job.sessionId) ?: return@withLock
         if (old.revision(claim.job.scope) != claim.job.scopeRevision) return@withLock // obsolete results never restore state
         val plan = store.getPendingPlan(old.sessionId)?.takeIf { it.jobId == claim.job.jobId }
-        val next = changed(old).copy(phase = blockedPhase, pauseRequested = false, errors = listOf(error),
+        val retrySameAction = plan == null || error.code in setOf(ErrorCode.CANCELLED, ErrorCode.TIMEOUT)
+        val toolMessage = plan?.takeIf { !retrySameAction }?.let { ChatMessage(ChatRole.TOOL, safeJson(Json.encodeToString(error)), it.toolCallId) }
+        var next = changed(old).copy(phase = blockedPhase, pauseRequested = false, errors = listOf(error),
             pendingInput = if (blockedPhase == Phase.AWAITING_INPUT) PendingInput(error.code.name.lowercase(), if (error.code == ErrorCode.MISSING_MODEL) "Install and load the missing local model, then Resume." else "Please record a replacement clip.") else old.pendingInput)
+        if (plan != null) {
+            val failed = plan.copy(status = if (retrySameAction) ActionStatus.UNKNOWN else ActionStatus.FAILED,
+                error = error, toolMessage = toolMessage, completedAtMs = if (retrySameAction) null else now())
+            next = next.copy(actions = (old.actions.filterNot { it.actionId == plan.actionId } + failed).takeLast(144), pendingAction = if (retrySameAction) failed else null)
+        }
+        if (!retrySameAction && next.activeActions(claim.job.scope).size >= 12) next = budgetExhausted(next)
+        if (plan == null && claim.job.attempt >= 3 && error.code !in setOf(ErrorCode.CANCELLED, ErrorCode.MISSING_MODEL, ErrorCode.MODEL_FAILED)) {
+            next = budgetExhausted(next)
+        }
         val base = checkpoint(next, claim.job.scope, store.getCheckpoint(old.sessionId))
-        val exchanges = if (plan != null && error.code != ErrorCode.CANCELLED) listOf(plan.assistantMessage,
-            ChatMessage(ChatRole.TOOL, safeJson(Json.encodeToString(error)), plan.toolCallId)) else base.exchanges
+        val exchanges = if (plan != null && toolMessage != null) listOf(plan.assistantMessage, toolMessage) else base.exchanges
+        val jobs = if (!retrySameAction && next.activeActions(claim.job.scope).size < 12) listOf(workflowJob(next, claim.job.scope)) else emptyList()
         store.recordFailure(FailureCommit(claim, plan?.actionId, error,
-            mutation(old, next, claim.job.scope, checkpointOverride = base.copy(exchanges = exchanges)), now()))
+            mutation(old, next, claim.job.scope, jobs, checkpointOverride = base.copy(exchanges = exchanges)), now(), retrySameAction))
     }
 
     private suspend fun settlePause(id: SessionId) = commands.withLock {
@@ -375,12 +468,22 @@ class OnDeviceCoordinator(
             if (!foreground) return
             val claim = store.claimOutbox(now()) ?: return
             if (!store.isExportStillApproved(claim)) return@repeat
-            try { store.acknowledgeOutbox(claim, history.append(claim.export)) }
-            catch (cancelled: CancellationException) { throw cancelled }
+            try {
+                store.acknowledgeOutbox(claim, withTimeout(45_000) { history.append(claim.export) })
+            }
+            catch (timeout: TimeoutCancellationException) {
+                store.failOutbox(claim, AppError(ErrorCode.TIMEOUT, "Export acknowledgement timed out; its saved identity can be retried.", true), now())
+                return
+            }
+            catch (cancelled: CancellationException) {
+                withContext(NonCancellable) { store.failOutbox(claim, AppError(ErrorCode.CANCELLED, "Export paused; delivery may be retried with its saved identity.", true), now()) }
+                throw cancelled
+            }
             catch (error: Throwable) {
                 store.failOutbox(claim, (error as? ClearLineException)?.error ?: AppError(ErrorCode.UNAVAILABLE, "Approved export is pending."), now())
                 return
             }
+            if (claim.export.projection is ExportProjection.Measurements) refreshMemory(claim.export.sessionId)
         }
     }
 
@@ -393,7 +496,7 @@ class OnDeviceCoordinator(
         val previous = prior?.takeIf { it.workflowScope == workflowScope && it.scopeRevision == state.revision(workflowScope) }
         val baseline = relevant.mapNotNull { (it.result as? ActionResult.Baseline)?.value }.lastOrNull() ?: previous?.baseline
         val obligations = if (workflowScope == WorkflowScope.RESEARCH) buildSet {
-            if (state.resources.isEmpty()) add(Requirement.PUBLIC_SEARCH_COMPLETE)
+            if (relevant.none { it.result is ActionResult.Search && it.status == ActionStatus.SUCCEEDED }) add(Requirement.PUBLIC_SEARCH_COMPLETE)
             if (state.sources.none { it.approvalId == state.approvedResources?.approvalId && it.inputRevision == state.researchRevision }) add(Requirement.PUBLIC_EXTRACTION_COMPLETE)
         } else buildSet {
             if (state.metrics == null) add(Requirement.AUDIO_ACCEPTED)
@@ -412,15 +515,17 @@ class OnDeviceCoordinator(
 
     private suspend fun save(old: SessionSnapshot, next: SessionSnapshot, workflowScope: WorkflowScope,
         jobs: List<JobRecord> = emptyList(), invalidate: Set<WorkflowScope> = emptySet(), summary: SessionSummary? = null,
-        checkpointOverride: AgentCheckpoint? = null, resume: Boolean = false) = store.applyCommand(
-        mutation(old, next, workflowScope, jobs, invalidate, summary, checkpointOverride, resume = resume))
+        checkpointOverride: AgentCheckpoint? = null, resume: Boolean = false, extraProjections: List<ExportProjection> = emptyList()): SessionSnapshot {
+        val preserved = checkpointOverride ?: checkpoint(next, workflowScope, store.getCheckpoint(old.sessionId))
+        return store.applyCommand(mutation(old, next, workflowScope, jobs, invalidate, summary, preserved, extraProjections, resume))
+    }
 
     private fun mutation(old: SessionSnapshot, next: SessionSnapshot, workflowScope: WorkflowScope,
         jobs: List<JobRecord> = emptyList(), invalidate: Set<WorkflowScope> = emptySet(), summary: SessionSummary? = null,
         checkpointOverride: AgentCheckpoint? = null, extraProjections: List<ExportProjection> = emptyList(), resume: Boolean = false): CommandMutation {
         val projections = mutableListOf<ExportProjection>()
         projections += ExportProjection.WorkflowCounts(next.phase, next.actions.count { it.status == ActionStatus.SUCCEEDED }, jobs.size)
-        if (summary != null) projections += ExportProjection.Measurements(summary.version, summary.metrics)
+        if (summary != null) projections += measurementProjection(next, summary)
         projections += extraProjections
         val exports = projections.map { projection -> ApprovedExport(ExportId.new(), next.profileId, next.sessionId,
             next.inputRevision, next.consent.exportRevision, next.dataOrigin, now(), projection) }
@@ -435,7 +540,26 @@ class OnDeviceCoordinator(
         val key = "${state.sessionId.value}:$workflowScope:$revision:$ordinal"
         return JobRecord(JobId(UUID.nameUUIDFromBytes(key.toByteArray()).toString()), state.sessionId, state.inputRevision,
             JobKind.ADVANCE_WORKFLOW, createdAtMs = now(), updatedAtMs = now(), scope = workflowScope, scopeRevision = revision)
+            .copy(stepOrdinal = ordinal)
     }
+
+    private fun measurementProjection(state: SessionSnapshot, summary: SessionSummary): ExportProjection.Measurements {
+        val includeText = ExportField.TRANSCRIPT_SNIPPET in state.consent.exportFields
+        return ExportProjection.Measurements(summary.version, summary.metrics,
+            transcriptSnippet = state.consent.reviewedTranscriptSnippet.takeIf { includeText },
+            topKeyword = state.consent.reviewedKeyword.takeIf { includeText },
+            sessionCreatedAtMs = state.createdAtMs, completedAtMs = summary.completedAtMs, task = state.task)
+    }
+
+    private fun withoutReviewedText(consent: ConsentState): ConsentState = if (ExportField.TRANSCRIPT_SNIPPET !in consent.exportFields && consent.reviewedTranscriptSnippet == null && consent.reviewedKeyword == null) consent else
+        consent.copy(exportFields = consent.exportFields - ExportField.TRANSCRIPT_SNIPPET, exportRevision = consent.exportRevision + 1,
+            updatedAtMs = now(), reviewedTranscriptSnippet = null, reviewedKeyword = null)
+
+    private fun budgetExhausted(state: SessionSnapshot) = state.copy(phase = Phase.AWAITING_INPUT,
+        pendingInput = PendingInput("action_budget", "Correct the transcript or approve a new resource request to begin a new workflow revision."),
+        errors = listOf(AppError(ErrorCode.RETRY_EXHAUSTED, "The bounded local workflow could not complete.")))
+
+    private suspend fun claimIsCurrent(claim: JobClaim) = store.getSession(claim.job.sessionId)?.revision(claim.job.scope) == claim.job.scopeRevision
 
     private fun summary(state: SessionSnapshot) = SessionSummary(state.sessionId, state.profileId, state.summaryVersion,
         state.inputRevision, state.task, state.dataOrigin, state.metrics ?: fail(ErrorCode.INVALID_INPUT, "No accepted metrics are available."),

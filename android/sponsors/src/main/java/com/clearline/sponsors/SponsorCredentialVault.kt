@@ -1,13 +1,12 @@
 package com.clearline.sponsors
 
 import com.clearline.core.*
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
+import java.util.concurrent.atomic.AtomicLong
 
 internal interface SponsorConfigurationStore {
     fun read(): SponsorConfiguration
@@ -21,6 +20,7 @@ internal class SponsorCredentialVault(
     private val configurations: SponsorConfigurationStore,
 ) : SponsorCredentialSettings, CredentialProvider {
     private val mutex = Mutex()
+    private val credentialVersions = Sponsor.entries.associateWith { AtomicLong() }
     private var initialized = false
     private val statuses = MutableStateFlow(Sponsor.entries.map { CredentialStatus(it, CredentialState.MISSING) })
     private val configurationState = MutableStateFlow(SponsorConfiguration())
@@ -66,6 +66,7 @@ internal class SponsorCredentialVault(
                     ByteArray(chars.size) { chars[it].code.toByte() }
                 }
                 try {
+                    credentialVersions.getValue(service).incrementAndGet()
                     blobs.write(service.id(), cipher.encrypt(service.id(), bytes))
                     setStatus(CredentialStatus(service, CredentialState.CONFIGURED))
                 } catch (error: Exception) {
@@ -81,6 +82,7 @@ internal class SponsorCredentialVault(
         withContext(Dispatchers.IO) {
             mutex.withLock {
                 try {
+                    credentialVersions.getValue(service).incrementAndGet()
                     // Deleting the encryption key also invalidates any leftover ciphertext.
                     cipher.deleteKey(service.id())
                     blobs.delete(service.id())
@@ -99,32 +101,47 @@ internal class SponsorCredentialVault(
             sponsorFailure(ErrorCode.INVALID_INPUT, "Select a RawTree database before enabling export.")
         withContext(Dispatchers.IO) {
             mutex.withLock {
-                try { configurations.write(configuration); configurationState.value = configuration }
+                try {
+                    val old = configurationState.value
+                    if (old.nimbleEnabled != configuration.nimbleEnabled) credentialVersions.getValue(Sponsor.NIMBLE).incrementAndGet()
+                    if (old.rawTreeEnabled != configuration.rawTreeEnabled || old.rawTreeDatabase != configuration.rawTreeDatabase)
+                        credentialVersions.getValue(Sponsor.RAWTREE).incrementAndGet()
+                    configurations.write(configuration)
+                    configurationState.value = configuration
+                }
                 catch (_: Exception) { sponsorFailure(ErrorCode.UNAVAILABLE, "Sponsor configuration could not be stored.") }
             }
         }
     }
 
-    override suspend fun <T> withCredential(service: Sponsor, block: suspend (ByteArray) -> T): T {
+    override suspend fun <T> withCredential(service: Sponsor, block: suspend (ByteArray, () -> Unit) -> T): T {
         initialize()
-        val token = withContext(Dispatchers.IO) {
-            mutex.withLock {
-                val config = configurationState.value
-                if ((service == Sponsor.NIMBLE && !config.nimbleEnabled) || (service == Sponsor.RAWTREE && !config.rawTreeEnabled))
-                    sponsorFailure(ErrorCode.CONSENT_REQUIRED, "This sponsor is disabled in settings.")
-                try {
-                    val encrypted = blobs.read(service.id()) ?: sponsorFailure(ErrorCode.UNAVAILABLE, "Sponsor credential is missing.")
-                    val decrypted = cipher.decrypt(service.id(), encrypted)
-                    try { validateToken(decrypted); decrypted }
-                    catch (error: Exception) { decrypted.fill(0); throw error }
-                } catch (error: ClearLineException) { throw error }
-                catch (_: Exception) {
-                    setStatus(CredentialStatus(service, CredentialState.ERROR, vaultError()))
-                    sponsorFailure(ErrorCode.UNAVAILABLE, "Sponsor credential cannot be read. Clear and re-enter it.")
+        // Keep the reference outside withContext so prompt cancellation when
+        // returning from IO also wipes a successfully decrypted temporary copy.
+        var token: ByteArray? = null
+        try {
+            val version = withContext(Dispatchers.IO) {
+                mutex.withLock {
+                    val config = configurationState.value
+                    if ((service == Sponsor.NIMBLE && !config.nimbleEnabled) || (service == Sponsor.RAWTREE && !config.rawTreeEnabled))
+                        sponsorFailure(ErrorCode.CONSENT_REQUIRED, "This sponsor is disabled in settings.")
+                    try {
+                        val encrypted = blobs.read(service.id()) ?: sponsorFailure(ErrorCode.UNAVAILABLE, "Sponsor credential is missing.")
+                        val decrypted = cipher.decrypt(service.id(), encrypted)
+                        try { validateToken(decrypted); token = decrypted; credentialVersions.getValue(service).get() }
+                        catch (error: Exception) { decrypted.fill(0); throw error }
+                    } catch (error: ClearLineException) { throw error }
+                    catch (_: Exception) {
+                        setStatus(CredentialStatus(service, CredentialState.ERROR, vaultError()))
+                        sponsorFailure(ErrorCode.UNAVAILABLE, "Sponsor credential cannot be read. Clear and re-enter it.")
+                    }
                 }
             }
-        }
-        return try { block(token) } finally { token.fill(0) }
+            return block(checkNotNull(token)) {
+                if (credentialVersions.getValue(service).get() != version)
+                    sponsorFailure(ErrorCode.STALE_REVISION, "Sponsor settings or credential changed before dispatch.")
+            }
+        } finally { token?.fill(0) }
     }
 
     private fun setStatus(status: CredentialStatus) { statuses.value = statuses.value.map { if (it.sponsor == status.sponsor) status else it } }

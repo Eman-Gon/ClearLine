@@ -48,6 +48,49 @@ class RawTreeMemoryTest {
         assertEquals(99L, result.sessionCount)
     }
 
+    @Test fun conflictingEqualVersionsFailRegardlessOfRowOrder() {
+        val original = row()
+        val otherSession = row(timestamp = cutoff - 2 * day)
+        val conflicts = listOf(
+            original.copy(metrics = original.metrics.copy(recordingWpm = 150.0)),
+            original.copy(transcriptSnippet = "different content"),
+        )
+        for (conflict in conflicts) {
+            for (rows in listOf(listOf(original, conflict, otherSession), listOf(otherSession, conflict, original))) {
+                val result = snapshot(rows)
+                assertEquals(RawTreeMemoryStatus.UNAVAILABLE, result.status)
+                assertEquals(ErrorCode.BAD_RESPONSE, result.diagnostics.error)
+                assertNull(result.dataPointCount)
+                assertNull(result.meanRecordingWpm)
+            }
+        }
+        // Structurally identical deliveries remain valid replays, including copied instances.
+        val replay = snapshot(listOf(original, original.copy(), otherSession))
+        assertEquals(RawTreeMemoryStatus.AVAILABLE, replay.status)
+        assertEquals(listOf(original, otherSession), replay.previousSessions)
+    }
+
+    @Test fun conflictingCurrentSessionCannotChooseBetweenPageAndSeparateRow() {
+        val currentRow = row(sessionId = current, timestamp = cutoff)
+        val result = RawTreeMemoryMath.snapshot(query, listOf(row(), row(), currentRow),
+            847, 99, cutoff + day, RawTreeMemoryDiagnostics(returnedRows = 3, latencyMs = 84),
+            currentSession = currentRow.copy(topKeyword = "different"))
+        assertEquals(RawTreeMemoryStatus.UNAVAILABLE, result.status)
+        assertEquals(ErrorCode.BAD_RESPONSE, result.diagnostics.error)
+        assertNull(result.currentSession)
+    }
+
+    @Test fun finiteExtremePositiveValuesProduceFiniteMeansWithoutOverflow() {
+        val maximumRows = (1..3).map { row(timestamp = cutoff - it * day, wpm = Double.MAX_VALUE, rms = 1.0) }
+        val result = snapshot(maximumRows)
+        assertEquals(RawTreeMemoryStatus.AVAILABLE, result.status)
+        assertEquals(Double.MAX_VALUE, result.meanRecordingWpm!!, 0.0)
+        assertEquals(1.0, result.meanEnergyRms!!, 0.0)
+        val zero = snapshot((1..3).map { row(timestamp = cutoff - it * day, wpm = 0.0, rms = 0.0) })
+        assertEquals(0.0, zero.meanRecordingWpm!!, 0.0)
+        assertEquals(0.0, zero.meanEnergyRms!!, 0.0)
+    }
+
     @Test fun currentIsDisplayedSeparatelyAndWindowAndCompletionBoundariesAreStrict() {
         val boundary = row(timestamp = query.windowStartMs)
         val inWindow = row(timestamp = cutoff - 1)

@@ -34,8 +34,8 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
         val outbox = dao.outboxForSession(snapshot.sessionId.value)
         return snapshot.copy(clips = dao.clips(snapshot.sessionId.value).map { decode<StoredClip>(it.json) }, actions = actions.takeLast(144), pendingAction = actions.lastOrNull { it.status in setOf(ActionStatus.PLANNED, ActionStatus.RUNNING, ActionStatus.UNKNOWN) && scopeRevision(snapshot, it.scope) == it.scopeRevision }, cloudSync = CloudSyncCounts(outbox.count { it.status in setOf("PENDING", "CLAIMED") }, outbox.count { it.status == "DELIVERED" }, outbox.count { it.status == "FAILED" }))
     }
-    private fun sessionRow(value: SessionSnapshot) = SessionRow(value.sessionId.value, value.profileId.value, value.phase.name, value.inputRevision, value.stateVersion, value.createdAtMs, encode(value.copy(clips = emptyList(), actions = emptyList(), pendingAction = null, cloudSync = CloudSyncCounts())))
-    private fun jobRow(value: JobRecord) = JobRow(value.jobId.value, value.sessionId.value, value.scope.name, value.scopeRevision, value.kind.name, value.clipId?.value ?: "", value.status.name, value.createdAtMs, encode(value))
+    private fun sessionRow(value: SessionSnapshot) = SessionRow(value.sessionId.value, value.profileId.value, value.phase.name, value.inputRevision, value.stateVersion, value.createdAtMs, value.summaryVersion, value.metrics != null, encode(value.copy(clips = emptyList(), actions = emptyList(), pendingAction = null, cloudSync = CloudSyncCounts())))
+    private fun jobRow(value: JobRecord) = JobRow(value.jobId.value, value.sessionId.value, value.scope.name, value.scopeRevision, value.kind.name, value.clipId?.value ?: "", value.stepOrdinal, value.status.name, value.createdAtMs, encode(value))
     private fun actionRow(value: ActionRecord) = ActionRow(value.actionId.value, value.jobId.value, value.sessionId.value, value.scope.name, value.scopeRevision, value.ordinal, value.status.name, encode(value))
     private fun clipRow(value: StoredClip) = ClipRow(value.clip.clipId.value, value.clip.sessionId.value, value.clip.sha256, value.clip.privatePath, encode(value))
     private fun scopeRevision(session: SessionSnapshot, scope: WorkflowScope) = if (scope == WorkflowScope.COMPARISON) session.comparisonRevision else session.researchRevision
@@ -101,6 +101,10 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
         val consent = ConsentRow(next.sessionId.value, next.consent.exportRevision, encode(next.consent))
         val oldConsent = dao.consent(consent.sessionId, consent.revision)
         if (oldConsent == null) dao.consent(consent) else if (oldConsent.json != consent.json) fail(ErrorCode.IDENTITY_CONFLICT, "Consent revision is immutable")
+        if (mutation.resumeEligibleJobs) for (row in dao.jobs(next.sessionId.value)) {
+            val job = decode<JobRecord>(row.json)
+            if (job.status in setOf(JobStatus.PAUSED, JobStatus.FAILED) && job.scopeRevision == scopeRevision(next, job.scope)) dao.job(jobRow(job.copy(status = JobStatus.PENDING, claimToken = null, updatedAtMs = next.updatedAtMs)))
+        }
         for (job in mutation.enqueueJobs) enqueue(job, next)
         for (source in next.sources) {
             if (next.approvedResources?.approvalId != source.approvalId) fail(ErrorCode.CONSENT_REQUIRED, "Evidence must match approved request")
@@ -114,7 +118,7 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
             if (clips.isEmpty() || clips.any { it.result == null } || clips.map { it.clip.clipId }.toSet() != summary.clipIds.toSet() || MeasurementMath.pool(clips.map { it.result!!.metrics }) != summary.metrics) fail(ErrorCode.INVALID_INPUT, "Summary must pool accepted current clips")
             val prior = dao.summary(next.sessionId.value)
             if (summary.version != (prior?.version ?: 0) + 1) fail(ErrorCode.STALE_REVISION, "Summary version must advance exactly once")
-            dao.summary(SummaryRow(summary.sessionId.value, summary.version, summary.profileId.value, summary.completedAtMs, encode(summary)))
+            dao.summary(SummaryRow(summary.sessionId.value, summary.version, summary.profileId.value, summary.completedAtMs, summary.inputRevision, summary.task.name, summary.dataOrigin.name, summary.metrics.measurementVersion, summary.metrics.lexicalVersion, encode(summary)))
         }
         cancelUnapprovedOutbox(next)
         for (export in mutation.exports) enqueueExport(export, next)
@@ -132,9 +136,17 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
     }
 
     override suspend fun admitClip(clip: CompletedLocalClip, acceptedAtMs: Long): ClipReceipt {
+        val admitted = database.withTransaction {
+            active(clip.sessionId)
+            dao.clip(clip.clipId.value)?.let { decode<StoredClip>(it.json) }
+        }
+        if (admitted != null) {
+            if (admitted.clip.sessionId != clip.sessionId || admitted.clip.sha256 != clip.sha256) fail(ErrorCode.IDENTITY_CONFLICT, "Clip ID already names different content")
+            return database.withTransaction { active(clip.sessionId); admitted.receipt.copy(duplicate = true) }
+        }
         withContext(Dispatchers.IO) { verifyAudioFile(clip) }
         return database.withTransaction {
-            val session = active(clip.sessionId)
+            var session = active(clip.sessionId)
             if (!session.consent.recording) fail(ErrorCode.CONSENT_REQUIRED, "Recording consent is required")
             if (session.dataOrigin != clip.dataOrigin) fail(ErrorCode.IDENTITY_CONFLICT, "Clip provenance must match session")
             val sameId = dao.clip(clip.clipId.value)?.let { decode<StoredClip>(it.json) }
@@ -149,14 +161,38 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
             }
             if (clips.size >= 20) fail(ErrorCode.INVALID_INPUT, "Clip limit reached")
             val superseded = clip.supersedesClipId?.let { id -> clips.find { it.clip.clipId == id && it.supersededBy == null } ?: fail(ErrorCode.INVALID_INPUT, "Replacement target is not current") }
+            val lastSummary = dao.summary(session.sessionId.value)?.let { decode<SessionSummary>(it.json) }
+            if (lastSummary != null && session.metrics != null) {
+                session = session.copy(inputRevision = session.inputRevision + 1, comparisonRevision = session.comparisonRevision + 1, researchRevision = session.researchRevision + 1, metrics = null, comparison = null, resources = emptyList(), sources = emptyList(), approvedResources = null, rawTreeMemory = null)
+                for (row in dao.jobs(session.sessionId.value)) { val old = decode<JobRecord>(row.json); dao.job(jobRow(old.copy(status = JobStatus.INVALIDATED, claimToken = null, updatedAtMs = acceptedAtMs))) }
+                for (row in dao.actions(session.sessionId.value)) { val old = decode<ActionRecord>(row.json); dao.updateAction(actionRow(old.copy(status = ActionStatus.INVALIDATED))) }
+                val oldConsent = session.consent
+                if (ExportField.TRANSCRIPT_SNIPPET in oldConsent.exportFields || oldConsent.reviewedTranscriptSnippet != null || oldConsent.reviewedKeyword != null) {
+                    val cleared = oldConsent.copy(exportFields = oldConsent.exportFields - ExportField.TRANSCRIPT_SNIPPET, reviewedTranscriptSnippet = null, reviewedKeyword = null, exportRevision = oldConsent.exportRevision + 1, updatedAtMs = acceptedAtMs)
+                    session = session.copy(consent = cleared)
+                    dao.consent(ConsentRow(session.sessionId.value, cleared.exportRevision, encode(cleared)))
+                }
+                cancelUnapprovedOutbox(session)
+            }
             val receipt = ClipReceipt(clip.sessionId, clip.clipId, clip.sha256, acceptedAtMs)
             dao.insertClip(clipRow(StoredClip(clip, receipt)))
-            superseded?.let { dao.updateClip(clipRow(it.copy(supersededBy = clip.clipId))) }
+            superseded?.let { oldClip ->
+                dao.updateClip(clipRow(oldClip.copy(supersededBy = clip.clipId)))
+                for (row in dao.jobs(session.sessionId.value)) {
+                    val oldJob = decode<JobRecord>(row.json)
+                    if (oldJob.clipId == oldClip.clip.clipId) dao.job(jobRow(oldJob.copy(status = JobStatus.INVALIDATED, claimToken = null, updatedAtMs = acceptedAtMs)))
+                }
+                dao.cleanup(CleanupRow(oldClip.clip.privatePath))
+            }
             val job = JobRecord(JobId(UUID.nameUUIDFromBytes("audio:${clip.sessionId.value}:${clip.clipId.value}".toByteArray()).toString()), clip.sessionId, session.inputRevision, JobKind.PROCESS_AUDIO, clipId = clip.clipId, createdAtMs = acceptedAtMs, updatedAtMs = acceptedAtMs, scopeRevision = session.comparisonRevision)
             enqueue(job, session)
-            val next = session.copy(stateVersion = session.stateVersion + 1, updatedAtMs = acceptedAtMs)
+            val next = session.copy(stateVersion = session.stateVersion + 1, updatedAtMs = acceptedAtMs, phase = Phase.PROCESSING, captureFinished = false, pendingInput = null, errors = emptyList(), pauseRequested = false)
             saveSession(next)
-            dao.checkpoint(next.sessionId.value)?.let { row -> val cp = decode<AgentCheckpoint>(row.json); dao.checkpoint(CheckpointRow(next.sessionId.value, encode(cp.copy(stateVersion = next.stateVersion)))) }
+            dao.checkpoint(next.sessionId.value)?.let { row ->
+                val cp = decode<AgentCheckpoint>(row.json)
+                val nextCp = if (cp.inputRevision != next.inputRevision) cp.copy(inputRevision = next.inputRevision, stateVersion = next.stateVersion, phase = next.phase, metrics = null, comparison = null, baseline = null, approvedResources = null, pendingInput = null, completedActionIds = emptyList(), pendingActionId = null, exchanges = emptyList(), sourceIds = emptyList(), candidateSources = emptyList(), workflowScope = WorkflowScope.COMPARISON, scopeRevision = next.comparisonRevision) else cp.copy(stateVersion = next.stateVersion, phase = next.phase, pendingInput = null)
+                dao.checkpoint(CheckpointRow(next.sessionId.value, encode(nextCp)))
+            }
             dao.event(EventRow("clip:${clip.clipId.value}", clip.sessionId.value, "clip_accepted", acceptedAtMs))
             receipt
         }
@@ -177,7 +213,7 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
 
     override suspend fun claimJob(sessionId: SessionId, nowMs: Long): JobClaim? = database.withTransaction {
         val session = active(sessionId)
-        if (session.pauseRequested || session.phase in setOf(Phase.PAUSED, Phase.READY, Phase.AWAITING_INPUT, Phase.AWAITING_USER_CHOICE, Phase.AGENT_UNAVAILABLE)) return@withTransaction null
+        if (session.pauseRequested || session.phase !in setOf(Phase.PROCESSING, Phase.COMPARING, Phase.RESEARCHING)) return@withTransaction null
         // Enforce the single execution claim in Room as well as in the coordinator.
         for (row in dao.sessions()) if (dao.jobs(row.sessionId).any { it.status == JobStatus.CLAIMED.name }) return@withTransaction null
         val pending = dao.jobs(sessionId.value).map { decode<JobRecord>(it.json) }.firstOrNull { it.status == JobStatus.PENDING && it.scopeRevision == scopeRevision(session, it.scope) } ?: return@withTransaction null
@@ -193,7 +229,7 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
     }
     override suspend fun getPendingPlan(sessionId: SessionId): ActionRecord? = database.withTransaction {
         val session = active(sessionId)
-        dao.actions(sessionId.value).map { decode<ActionRecord>(it.json) }.lastOrNull { it.status in setOf(ActionStatus.PLANNED, ActionStatus.RUNNING, ActionStatus.UNKNOWN, ActionStatus.FAILED) && it.scopeRevision == scopeRevision(session, it.scope) }
+        dao.actions(sessionId.value).map { decode<ActionRecord>(it.json) }.lastOrNull { it.status in setOf(ActionStatus.PLANNED, ActionStatus.RUNNING, ActionStatus.UNKNOWN) && it.scopeRevision == scopeRevision(session, it.scope) }
     }
     override suspend fun persistPlan(claim: JobClaim, action: ActionRecord): ActionRecord = database.withTransaction {
         val (session, job) = requireClaim(claim)
@@ -229,20 +265,15 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
         if (commit.toolMessage.role != ChatRole.TOOL || commit.toolMessage.toolCallId != action.toolCallId) fail(ErrorCode.IDENTITY_CONFLICT, "Tool result must match persisted call identity")
         dao.updateAction(actionRow(action.copy(status = ActionStatus.SUCCEEDED, result = commit.result, toolMessage = commit.toolMessage, completedAtMs = commit.completedAtMs)))
         val result = apply(commit.mutation)
-        val nextStatus = when (result.phase) {
-            Phase.READY -> JobStatus.COMPLETED
-            Phase.PAUSED, Phase.AWAITING_INPUT, Phase.AWAITING_USER_CHOICE, Phase.AGENT_UNAVAILABLE -> JobStatus.PAUSED
-            else -> if (result.pauseRequested) JobStatus.PAUSED else JobStatus.PENDING
-        }
-        dao.job(jobRow(job.copy(status = nextStatus, claimToken = null, updatedAtMs = commit.completedAtMs)))
+        dao.job(jobRow(job.copy(status = JobStatus.COMPLETED, claimToken = null, updatedAtMs = commit.completedAtMs)))
         hydrate(result)
     }
     private fun validateResult(session: SessionSnapshot, proposed: ProposedAction, result: ActionResult) {
         val valid = when (proposed) {
             ProposedAction.GetBaselineSummary -> result is ActionResult.Baseline
             ProposedAction.CompareRecordingMetrics -> result is ActionResult.Comparison
-            ProposedAction.SearchPublicResources -> result is ActionResult.Search && result.value.approvalId == session.approvedResources?.approvalId && result.value.inputRevision == session.approvedResources.inputRevision
-            is ProposedAction.ExtractPublicPage -> result is ActionResult.Extract && result.value.approvalId == session.approvedResources?.approvalId && result.value.inputRevision == session.approvedResources.inputRevision && result.value.sourceUrl == session.resources.firstOrNull { it.candidateId == proposed.candidateId }?.url
+            ProposedAction.SearchPublicResources -> result is ActionResult.Search && result.value.approvalId == session.approvedResources?.approvalId && result.value.inputRevision == session.approvedResources?.inputRevision
+            is ProposedAction.ExtractPublicPage -> result is ActionResult.Extract && result.value.approvalId == session.approvedResources?.approvalId && result.value.inputRevision == session.approvedResources?.inputRevision && result.value.sourceUrl == session.resources.firstOrNull { it.candidateId == proposed.candidateId }?.url
             is ProposedAction.RequestUserInput -> result is ActionResult.InputRequested && result.value == proposed.input
             ProposedAction.FinishTask -> result == ActionResult.Finished
         }
@@ -253,7 +284,7 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
         if (job.kind != JobKind.PROCESS_AUDIO || job.clipId != commit.result.clipId || commit.mutation.snapshot.sessionId != session.sessionId) fail(ErrorCode.IDENTITY_CONFLICT, "Audio result must match claimed clip")
         val stored = dao.clip(commit.result.clipId.value)?.let { decode<StoredClip>(it.json) } ?: fail(ErrorCode.NOT_FOUND, "Accepted clip is missing")
         val metrics = commit.result.metrics
-        if (stored.supersededBy != null || stored.result != null || metrics.dataOrigin != stored.clip.dataOrigin || metrics.measurementVersion != stored.clip.measurementVersion || kotlin.math.abs(metrics.durationSeconds - stored.clip.durationSeconds) > 1.0 / 16000.0 || metrics.quality != AudioQuality.ACCEPTED || metrics.wordCount != MeasurementMath.countEnglishWords(commit.result.transcript)) fail(ErrorCode.INVALID_INPUT, "Audio result does not describe accepted current input")
+        if (stored.supersededBy != null || stored.result != null || metrics.dataOrigin != stored.clip.dataOrigin || metrics.measurementVersion != stored.clip.measurementVersion || kotlin.math.abs(metrics.durationSeconds - stored.clip.durationSeconds) > 1.0 / 16000.0 || metrics.quality != AudioQuality.ACCEPTED || metrics.wordCount == 0 || metrics.energyRms <= 0.0 || metrics.wordCount != MeasurementMath.countEnglishWords(commit.result.transcript)) fail(ErrorCode.INVALID_INPUT, "Audio result does not describe accepted current input")
         dao.updateClip(clipRow(stored.copy(result = commit.result)))
         val result = apply(commit.mutation.copy(snapshot = commit.mutation.snapshot.copy(clips = emptyList())))
         dao.job(jobRow(job.copy(status = JobStatus.COMPLETED, claimToken = null, updatedAtMs = result.updatedAtMs)))
@@ -265,28 +296,32 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
         commit.actionId?.let { id ->
             val action = dao.action(id.value)?.let { decode<ActionRecord>(it.json) } ?: fail(ErrorCode.NOT_FOUND, "Failed plan is missing")
             if (action.jobId != job.jobId) fail(ErrorCode.IDENTITY_CONFLICT, "Failed plan does not match claim")
-            dao.updateAction(actionRow(action.copy(status = ActionStatus.FAILED, error = commit.error)))
+            dao.updateAction(actionRow(action.copy(status = if (commit.retrySameAction) ActionStatus.UNKNOWN else ActionStatus.FAILED, error = commit.error)))
         }
         val next = apply(commit.mutation)
-        dao.job(jobRow(job.copy(status = JobStatus.FAILED, claimToken = null, updatedAtMs = commit.failedAtMs)))
+        dao.job(jobRow(job.copy(status = if (commit.retrySameAction) JobStatus.FAILED else JobStatus.COMPLETED, claimToken = null, updatedAtMs = commit.failedAtMs)))
         if (!commit.error.retryable && job.kind == JobKind.PROCESS_AUDIO) job.clipId?.let { id -> dao.clip(id.value)?.let { dao.cleanup(CleanupRow(it.privatePath)) } }
         hydrate(next)
     }
-    override suspend fun recoverInterrupted(nowMs: Long): RecoveryReport = database.withTransaction {
+    override suspend fun recoverInterrupted(nowMs: Long): RecoveryReport {
+        val diskFiles = withContext(Dispatchers.IO) { if (audioDirectory.exists()) audioDirectory.walkTopDown().filter { it.isFile }.map { it.canonicalPath }.toList() else emptyList() }
+        return database.withTransaction {
+        val admittedPaths = dao.sessions().flatMap { dao.clips(it.sessionId) }.map { File(it.privatePath).canonicalPath }.toSet()
+        diskFiles.filter { it !in admittedPaths }.forEach { dao.cleanup(CleanupRow(it)) }
         val paused = mutableListOf<SessionId>()
         val unknown = mutableListOf<ActionId>()
         for (row in dao.sessions()) {
             val session = decode<SessionSnapshot>(row.json)
             var interrupted = false
-            for (jobRow in dao.jobs(row.sessionId)) {
-                val job = decode<JobRecord>(jobRow.json)
+            for (storedJobRow in dao.jobs(row.sessionId)) {
+                val job = decode<JobRecord>(storedJobRow.json)
                 if (job.status in setOf(JobStatus.CLAIMED, JobStatus.PENDING)) {
                     dao.job(jobRow(job.copy(status = JobStatus.PAUSED, claimToken = null, updatedAtMs = nowMs)))
                     interrupted = true
                 }
             }
-            for (actionRow in dao.actions(row.sessionId)) {
-                val action = decode<ActionRecord>(actionRow.json)
+            for (storedActionRow in dao.actions(row.sessionId)) {
+                val action = decode<ActionRecord>(storedActionRow.json)
                 if (action.status in setOf(ActionStatus.RUNNING, ActionStatus.PLANNED)) {
                     dao.updateAction(actionRow(action.copy(status = ActionStatus.UNKNOWN)))
                     unknown += action.actionId
@@ -306,19 +341,19 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
             dao.updateOutbox(row.copy(status = if (session != null && approved(export, session)) "PENDING" else "CANCELLED", claimToken = null))
         }
         RecoveryReport(paused, unknown, dao.cleanupPaths())
+        }
     }
     override suspend fun readBaseline(query: BaselineQuery): BaselineSummary = database.withTransaction {
-        val eligible = latest(dao.summaries(query.profileId.value)).filter { summary ->
-            val source = dao.session(summary.sessionId.value)?.let { decode<SessionSnapshot>(it.json) }
-            summary.sessionId != query.currentSessionId && summary.task == query.task && summary.dataOrigin == query.dataOrigin && summary.metrics.measurementVersion == query.measurementVersion && summary.metrics.lexicalVersion == query.lexicalVersion && summary.metrics.quality == AudioQuality.ACCEPTED && source != null && source.createdAtMs < query.beforeCreatedAtMs
-        }.sortedByDescending { it.completedAtMs }.take(5)
+        val eligible = dao.baseline(query.profileId.value, query.currentSessionId.value, query.task.name, query.dataOrigin.name, query.measurementVersion, query.lexicalVersion, query.beforeCreatedAtMs).map { decode<SessionSummary>(it.json) }
         MeasurementMath.baseline(eligible)
     }
 
     private fun approved(export: ApprovedExport, session: SessionSnapshot): Boolean {
         if (export.profileId != session.profileId || export.sessionId != session.sessionId || export.dataOrigin != session.dataOrigin || export.inputRevision != session.inputRevision || export.consentRevision != session.consent.exportRevision || export.requiredField !in session.consent.exportFields || export.createdAtMs < session.consent.updatedAtMs) return false
         val measurements = export.projection as? ExportProjection.Measurements
-        if (measurements != null && (measurements.transcriptSnippet != null || measurements.topKeyword != null) && ExportField.TRANSCRIPT_SNIPPET !in session.consent.exportFields) return false
+        if (measurements != null && (measurements.transcriptSnippet != null || measurements.topKeyword != null)) {
+            if (ExportField.TRANSCRIPT_SNIPPET !in session.consent.exportFields || measurements.transcriptSnippet != session.consent.reviewedTranscriptSnippet || measurements.topKeyword != session.consent.reviewedKeyword) return false
+        }
         return true
     }
     private suspend fun enqueueExport(export: ApprovedExport, session: SessionSnapshot) {
@@ -365,7 +400,7 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
     override suspend fun revokeExportConsent(sessionId: SessionId, expectedConsentRevision: Long, nowMs: Long): SessionSnapshot = database.withTransaction {
         val old = active(sessionId)
         if (old.consent.exportRevision != expectedConsentRevision) fail(ErrorCode.STALE_REVISION, "Export approval already changed")
-        val next = old.copy(stateVersion = old.stateVersion + 1, updatedAtMs = nowMs, consent = old.consent.copy(exportFields = emptySet(), exportRevision = old.consent.exportRevision + 1, updatedAtMs = nowMs))
+        val next = old.copy(stateVersion = old.stateVersion + 1, updatedAtMs = nowMs, consent = old.consent.copy(exportFields = emptySet(), exportRevision = old.consent.exportRevision + 1, updatedAtMs = nowMs, reviewedTranscriptSnippet = null, reviewedKeyword = null))
         val cp = getCheckpoint(sessionId) ?: fail(ErrorCode.NOT_FOUND, "Checkpoint is missing")
         apply(CommandMutation(old.stateVersion, old.inputRevision, next, cp.copy(stateVersion = next.stateVersion)))
     }

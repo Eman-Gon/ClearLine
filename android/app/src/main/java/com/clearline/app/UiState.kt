@@ -2,7 +2,7 @@ package com.clearline.app
 
 import com.clearline.core.*
 
-enum class Screen { HOME, CHECK_IN, SUMMARY, FOLLOW_UP, SETUP }
+enum class Screen { HOME, CHECK_IN, SUMMARY, FOLLOW_UP, SETUP, DIAGNOSTICS }
 data class CaptureUi(val active: Boolean = false, val elapsedMs: Long = 0, val rms: Float = 0f, val message: String? = null)
 data class AppUiState(
     val screen: Screen = Screen.HOME,
@@ -32,10 +32,11 @@ sealed interface UiEvent {
     data object FinishCapture : UiEvent
     data object Pause : UiEvent
     data object Resume : UiEvent
-    data class RequestResources(val category: ResourceCategory, val city: String, val revision: Long) : UiEvent
+    data class RequestResources(val draft: CallQueryDraft, val revision: Long) : UiEvent
     data class CorrectTranscript(val clipId: ClipId, val text: String, val revision: Long) : UiEvent
     data class Answer(val text: String, val revision: Long) : UiEvent
-    data class ExportConsent(val fields: Set<ExportField>, val revision: Long) : UiEvent
+    data class ExportConsent(val fields: Set<ExportField>, val revision: Long, val snippet: String? = null, val keyword: String? = null) : UiEvent
+    data object RefreshExportedMemory : UiEvent
     data object DeleteSession : UiEvent
     data object DeleteProfile : UiEvent
     data class DownloadModel(val kind: ModelKind) : UiEvent

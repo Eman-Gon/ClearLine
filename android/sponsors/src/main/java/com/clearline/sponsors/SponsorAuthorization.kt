@@ -13,6 +13,9 @@ interface SponsorAuthorization {
     suspend fun requireSource(source: ApprovedSource)
     suspend fun requireExport(event: ApprovedExport)
     suspend fun requireHistory(request: BoundedHistoryQuery)
+    suspend fun requireMemory(request: MemoryQuery) {
+        sponsorFailure(ErrorCode.CONSENT_REQUIRED, "Exported memory requires current authorization.")
+    }
 }
 
 /** Missing composition never grants implicit approval, including synthetic data. */
@@ -22,4 +25,5 @@ object DenySponsorAuthorization : SponsorAuthorization {
     override suspend fun requireSource(source: ApprovedSource): Unit = denied()
     override suspend fun requireExport(event: ApprovedExport): Unit = denied()
     override suspend fun requireHistory(request: BoundedHistoryQuery): Unit = denied()
+    override suspend fun requireMemory(request: MemoryQuery): Unit = denied()
 }

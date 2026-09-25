@@ -47,7 +47,7 @@ interface SponsorCredentialSettings {
 @Serializable enum class ExportEventStatus { COMPLETED, PENDING, PAUSED, FAILED }
 @Serializable sealed interface ExportProjection {
     @Serializable data class Event(val eventId: String, val name: ExportEventName, val status: ExportEventStatus, val timestampMs: Long) : ExportProjection { init { require(eventId.length in 1..128) } }
-    @Serializable data class Measurements(val summaryVersion: Int, val metrics: RecordingMetrics, val transcriptSnippet: String? = null, val topKeyword: String? = null) : ExportProjection { init { require(transcriptSnippet == null || transcriptSnippet.length <= 200); require(topKeyword == null || topKeyword.length <= 40) } }
+    @Serializable data class Measurements(val summaryVersion: Int, val metrics: RecordingMetrics, val transcriptSnippet: String? = null, val topKeyword: String? = null, val sessionCreatedAtMs: Long? = null, val completedAtMs: Long? = null, val task: RecordingTask = RecordingTask.CHECK_IN) : ExportProjection { init { require(transcriptSnippet == null || transcriptSnippet.length <= 200); require(topKeyword == null || topKeyword.length <= 40) } }
     @Serializable data class WorkflowCounts(val phase: Phase, val completedCount: Int, val pendingCount: Int) : ExportProjection { init { require(completedCount >= 0 && pendingCount >= 0) } }
     @Serializable data class PublicResource(val evidence: SourceEvidence) : ExportProjection
 }
@@ -59,7 +59,7 @@ interface SponsorCredentialSettings {
 @Serializable data class BoundedHistoryQuery(val sessionId: SessionId, val exportId: ExportId? = null, val limit: Int = 20, val field: ExportField = ExportField.EVENTS) { init { require(limit in 1..100) } }
 @Serializable data class ExportedHistoryRecord(val exportId: ExportId, val sessionRef: String, val inputRevision: Long, val dataOrigin: DataOrigin, val createdAtMs: Long, val projection: ExportedHistoryProjection) { init { require(sessionRef.length in 1..128 && inputRevision >= 0) } }
 @Serializable data class HistoryResult(val records: List<ExportedHistoryRecord>, val retrievedAtMs: Long) { init { require(records.size <= 100) } }
-interface ApprovedHistoryClient { suspend fun append(event: ApprovedExport): DeliveryReceipt; suspend fun query(request: BoundedHistoryQuery): HistoryResult }
+interface ApprovedHistoryClient { suspend fun append(event: ApprovedExport): DeliveryReceipt; suspend fun query(request: BoundedHistoryQuery): HistoryResult; suspend fun memory(query: MemoryQuery): RawTreeMemorySnapshot }
 
 /** Cloud reads have no local approval/profile identity and cannot authorize local actions. */
 @Serializable data class ExportedSourceEvidence(val evidenceId: EvidenceId, val version: Int, val title: String, val description: String?, val sourceUrl: String, val retrievedAtMs: Long, val contentHash: String, val passages: List<SupportingPassage>, val facts: PublicFacts, val verificationStatus: VerificationStatus)

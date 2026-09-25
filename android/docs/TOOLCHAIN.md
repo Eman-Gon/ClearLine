@@ -40,6 +40,7 @@ Installation requires a connected device with USB debugging enabled and its auth
 - Existing adb 33.0.3 reports no attached devices. S24 hardware gates are **NOT RUN**.
 - Standard Gradle 8.11.1 wrapper generation passed, including the distribution checksum pin.
 - The initial root `:core:test` resolved build plugins, then stopped during native-module configuration because NDK 27.2.12479018's SDK license was not yet accepted. No Android compilation or native test passed at that point.
+- A temporary JVM-only Gradle harness compiled the real core module and passed its initial seven `CallInsightsTest` tests. This is host-only contract verification, not Android execution. The first compiler attempt encountered an incremental-cache daemon error; Gradle's fallback compiler completed successfully. For concurrent development, `-Pkotlin.compiler.execution.strategy=in-process` avoids sharing the Kotlin compiler daemon.
 - SDK package installation awaits license approval; compilation results will be recorded separately when the complete project is built.
 
 In a restricted coding sandbox, Gradle's local daemon socket and dependency downloads require the execution tool's normal escalation path. The initial sandboxed wrapper generation failed with `SocketException: Operation not permitted`; this was an environment restriction, not an Android compiler failure.

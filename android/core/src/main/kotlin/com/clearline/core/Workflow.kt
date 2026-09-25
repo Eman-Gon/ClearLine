@@ -3,7 +3,7 @@ package com.clearline.core
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
 
-@Serializable data class ConsentState(val recording: Boolean = false, val exportFields: Set<ExportField> = emptySet(), val exportRevision: Long = 0, val updatedAtMs: Long = 0) { init { require(exportRevision >= 0) } }
+@Serializable data class ConsentState(val recording: Boolean = false, val exportFields: Set<ExportField> = emptySet(), val exportRevision: Long = 0, val updatedAtMs: Long = 0, val reviewedTranscriptSnippet: String? = null, val reviewedKeyword: String? = null) { init { require(exportRevision >= 0); require(reviewedTranscriptSnippet == null || reviewedTranscriptSnippet.length <= 200); require(reviewedKeyword == null || reviewedKeyword.length <= 40) } }
 @Serializable data class CloudSyncCounts(val pending: Int = 0, val delivered: Int = 0, val failed: Int = 0) { init { require(pending >= 0 && delivered >= 0 && failed >= 0) } }
 @Serializable data class SessionSummary(val sessionId: SessionId, val profileId: ProfileId, val version: Int, val inputRevision: Long, val task: RecordingTask, val dataOrigin: DataOrigin, val metrics: RecordingMetrics, val completedAtMs: Long, val clipIds: List<ClipId>) { init { require(version > 0 && inputRevision >= 0 && clipIds.isNotEmpty() && clipIds.size <= 20) } }
 @Serializable enum class BaselineStatus { AVAILABLE, INSUFFICIENT_HISTORY }
@@ -39,7 +39,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class CreateSession(val profileId: ProfileId, val recordingConsent: Boolean, val dataOrigin: DataOrigin = DataOrigin.CONSENTED_DEMO, val executionMode: ExecutionMode = ExecutionMode.REAL_ON_DEVICE, val task: RecordingTask = RecordingTask.CHECK_IN)
 @Serializable sealed interface UserInput { @Serializable data class TranscriptCorrection(val clipId: ClipId, val transcript: String) : UserInput { init { require(transcript.length in 1..20000) } }; @Serializable data class Answer(val text: String) : UserInput { init { require(text.length in 1..1000) } } }
 @Serializable data class RevisionedUserInput(val sessionId: SessionId, val inputRevision: Long, val input: UserInput)
-@Serializable data class ExportConsentChange(val sessionId: SessionId, val expectedConsentRevision: Long, val selectedFields: Set<ExportField>)
+@Serializable data class ExportConsentChange(val sessionId: SessionId, val expectedConsentRevision: Long, val selectedFields: Set<ExportField>, val reviewedTranscriptSnippet: String? = null, val reviewedKeyword: String? = null) { init { require(reviewedTranscriptSnippet == null || reviewedTranscriptSnippet.length <= 200); require(reviewedKeyword == null || reviewedKeyword.length <= 40) } }
 interface CheckInCommands {
     suspend fun createSession(input: CreateSession): SessionId
     suspend fun acceptClip(input: CompletedLocalClip): ClipReceipt
@@ -49,6 +49,7 @@ interface CheckInCommands {
     suspend fun pause(sessionId: SessionId)
     suspend fun resume(sessionId: SessionId)
     suspend fun setExportConsent(input: ExportConsentChange)
+    suspend fun refreshExportedMemory(sessionId: SessionId)
     suspend fun deleteSession(sessionId: SessionId)
     suspend fun deleteProfile(profileId: ProfileId)
 }

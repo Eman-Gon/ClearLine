@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable enum class JobKind { PROCESS_AUDIO, ADVANCE_WORKFLOW }
 @Serializable enum class JobStatus { PENDING, CLAIMED, PAUSED, COMPLETED, FAILED, INVALIDATED }
-@Serializable data class JobRecord(val jobId: JobId, val sessionId: SessionId, val inputRevision: Long, val kind: JobKind, val status: JobStatus = JobStatus.PENDING, val clipId: ClipId? = null, val attempt: Int = 0, val createdAtMs: Long, val updatedAtMs: Long, val claimToken: String? = null, val scope: WorkflowScope = WorkflowScope.COMPARISON, val scopeRevision: Long = inputRevision) { init { require(scopeRevision >= 0 && inputRevision >= 0 && attempt >= 0); require((kind == JobKind.PROCESS_AUDIO) == (clipId != null)) } }
+@Serializable data class JobRecord(val jobId: JobId, val sessionId: SessionId, val inputRevision: Long, val kind: JobKind, val status: JobStatus = JobStatus.PENDING, val clipId: ClipId? = null, val attempt: Int = 0, val createdAtMs: Long, val updatedAtMs: Long, val claimToken: String? = null, val scope: WorkflowScope = WorkflowScope.COMPARISON, val scopeRevision: Long = inputRevision, val stepOrdinal: Int = 0) { init { require(stepOrdinal in 0..12); require(scopeRevision >= 0 && inputRevision >= 0 && attempt >= 0); require((kind == JobKind.PROCESS_AUDIO) == (clipId != null)) } }
 @Serializable data class JobClaim(val job: JobRecord, val claimToken: String)
 /** Agent computes transitions outside Room; store enforces identities, optimistic versions and atomicity. */
 data class CommandMutation(
@@ -22,7 +22,7 @@ data class CommandMutation(
 )
 data class ActionSuccessCommit(val claim: JobClaim, val actionId: ActionId, val result: ActionResult, val toolMessage: ChatMessage, val mutation: CommandMutation, val completedAtMs: Long)
 data class AudioSuccessCommit(val claim: JobClaim, val result: AudioResult, val mutation: CommandMutation)
-data class FailureCommit(val claim: JobClaim, val actionId: ActionId?, val error: AppError, val mutation: CommandMutation, val failedAtMs: Long)
+data class FailureCommit(val claim: JobClaim, val actionId: ActionId?, val error: AppError, val mutation: CommandMutation, val failedAtMs: Long, val retrySameAction: Boolean = true)
 @Serializable data class BaselineQuery(val profileId: ProfileId, val currentSessionId: SessionId, val task: RecordingTask, val dataOrigin: DataOrigin, val measurementVersion: String, val lexicalVersion: String, val beforeCreatedAtMs: Long)
 @Serializable data class OutboxClaim(val export: ApprovedExport, val claimToken: String, val attempt: Int)
 @Serializable data class RecoveryReport(val pausedSessions: List<SessionId>, val interruptedActionIds: List<ActionId>, val cleanupPaths: List<String>)

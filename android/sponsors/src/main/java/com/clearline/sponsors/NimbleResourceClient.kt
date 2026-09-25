@@ -58,7 +58,11 @@ class NimbleResourceClient internal constructor(
         return SearchResult(request.approvalId, request.inputRevision, candidates, retrievedAt, requestId)
     }
 
-    override suspend fun extract(source: ApprovedSource): SourceEvidence {
+    override suspend fun extract(source: ApprovedSource): SourceEvidence =
+        withTimeoutOrNull(45_000) { extractApproved(source) }
+            ?: sponsorFailure(ErrorCode.TIMEOUT, "Public source extraction exceeded its action budget.", true)
+
+    private suspend fun extractApproved(source: ApprovedSource): SourceEvidence {
         authorization.requireSource(source)
         validateRequest(source.request)
         val candidate = source.candidate
@@ -145,9 +149,9 @@ class NimbleResourceClient internal constructor(
         private const val MAX_CONTENT_CHARS = 150_000
         private const val MAX_HTML_CHARS = 1_000_000
         private val CITY = Regex("[\\p{L}\\p{M}\\p{N} .,()'’\\-]+")
-        private val PHONE = Regex("(?:Phone|Telephone|Tel)[ \\t]*:[ \\t]*((?:\\+1[ .-]?)?(?:\\([0-9]{3}\\)|[0-9]{3})[ .-]?[0-9]{3}[ .-]?[0-9]{4}(?:[ \\t]*(?:ext\\.?|x)[ \\t]*[0-9]{1,6})?)", RegexOption.IGNORE_CASE)
-        private val ADDRESS = Regex("(?:Street address|Address)[ \\t]*:[ \\t]*([0-9]{1,6}[ \\t]+[^\\r\\n<>]{5,180})", RegexOption.IGNORE_CASE)
-        private val HOURS = Regex("(?:Office hours|Opening hours|Hours)[ \\t]*:[ \\t]*([^\\r\\n<>]{3,160})", RegexOption.IGNORE_CASE)
+        private val PHONE = Regex("\\b(?:Phone|Telephone|Tel)[ \\t]*:[ \\t]*((?:\\+1[ .-]?)?(?:\\([0-9]{3}\\)|[0-9]{3})[ .-]?[0-9]{3}[ .-]?[0-9]{4}(?:[ \\t]*(?:ext\\.?|x)[ \\t]*[0-9]{1,6})?)(?![0-9])", RegexOption.IGNORE_CASE)
+        private val ADDRESS = Regex("\\b(?:Street address|Address)[ \\t]*:[ \\t]*([0-9]{1,6}[ \\t]+[^\\r\\n<>]{5,180})", RegexOption.IGNORE_CASE)
+        private val HOURS = Regex("\\b(?:Office hours|Opening hours|Hours)[ \\t]*:[ \\t]*([^\\r\\n<>]{3,160})", RegexOption.IGNORE_CASE)
     }
 }
 
@@ -190,6 +194,13 @@ internal object PublicSourceUrls {
 
     suspend fun verifyDns(url: String, resolver: PublicSourceDns) {
         val host = URI(url).host.removeSurrounding("[", "]").trimEnd('.')
+        // Android DnsResolver.query expects a DNS name, not an IP literal.
+        // normalize() has already rejected alternate numeric encodings/scopes.
+        if (':' in host || host.all { it.isDigit() || it == '.' }) {
+            val address = try { InetAddress.getByName(host) } catch (_: Exception) { invalid() }
+            if (!isPublic(address)) invalid()
+            return
+        }
         val addresses = withTimeoutOrNull(5_000) { resolver.resolve(host) }
             ?: sponsorFailure(ErrorCode.TIMEOUT, "Public source DNS verification timed out.", true)
         if (addresses.isEmpty() || addresses.any { !isPublic(it) }) invalid()

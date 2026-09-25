@@ -3,6 +3,7 @@ package com.clearline.sponsors
 import com.clearline.core.*
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.*
 
 /** Optional exported history only. This client never reads or mutates Room. */
@@ -45,6 +46,41 @@ internal class RawTreeHistoryClient(
         return HistoryResult(records, nowMs())
     }
 
+    override suspend fun memory(query: MemoryQuery): RawTreeMemorySnapshot {
+        val started = System.nanoTime()
+        fun diagnostics(rows: Int? = null, error: ErrorCode? = null) = RawTreeMemoryDiagnostics(
+            returnedRows = rows, latencyMs = ((System.nanoTime() - started) / 1_000_000).coerceAtLeast(0), error = error,
+        )
+        return try {
+            val database = enabledDatabase()
+            suspend fun rows(sql: String, maximum: Int): JsonArray {
+                val response = http.post(Sponsor.RAWTREE, "/v1/query", buildJsonObject { put("sql", sql) }, database) {
+                    requireSameDatabase(database)
+                    authorization.requireMemory(query)
+                }
+                val data = response["data"] as? JsonArray
+                    ?: sponsorFailure(ErrorCode.BAD_RESPONSE, "RawTree memory response has no data rows.")
+                if (data.size > maximum)
+                    sponsorFailure(ErrorCode.BAD_RESPONSE, "RawTree memory response exceeded its row bound.")
+                return data
+            }
+            val sql = RawTreeExportWire.memorySql(query)
+            val counts = rows(sql.counts, 1).singleOrNull()?.jsonObject
+                ?: sponsorFailure(ErrorCode.BAD_RESPONSE, "RawTree memory counts were unavailable.")
+            val dataPoints = RawTreeExportWire.count(counts["data_point_count"])
+            val sessionCount = RawTreeExportWire.count(counts["session_count"])
+            val previous = rows(sql.previous, query.limit).map { RawTreeExportWire.decodeMemory(it, query) }
+            val current = rows(sql.current, 1).singleOrNull()?.let { RawTreeExportWire.decodeMemory(it, query) }
+            RawTreeMemoryMath.snapshot(query, previous, dataPoints, sessionCount, nowMs(), diagnostics(previous.size + if (current == null) 0 else 1), current)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: ClearLineException) {
+            RawTreeMemoryMath.unavailable(query, nowMs(), diagnostics(error = error.error.code))
+        } catch (_: Exception) {
+            RawTreeMemoryMath.unavailable(query, nowMs(), diagnostics(error = ErrorCode.BAD_RESPONSE))
+        }
+    }
+
     private suspend fun enabledDatabase(): String {
         val config = configuration()
         if (!config.rawTreeEnabled)
@@ -63,6 +99,50 @@ internal class RawTreeHistoryClient(
 internal object RawTreeExportWire {
     private val qualityCodes = setOf("too_short", "too_long", "silent", "no_speech", "empty_transcript", "invalid_audio", "decode_failed", "missing_audio", "unsupported_media", "empty_audio")
     private val hashPattern = Regex("[0-9a-f]{64}")
+
+    data class MemorySql(val counts: String, val previous: String, val current: String)
+
+    fun memorySql(query: MemoryQuery): MemorySql {
+        valid(query.measurementVersion.matches(Regex("[A-Za-z0-9_.:-]{1,64}")) && query.lexicalVersion.matches(Regex("[A-Za-z0-9_.:-]{1,64}")))
+        val scope = "schema_version = 3 AND projection_type = 'measurements' AND profile_ref = '${profileRef(query.profileId)}'"
+        val origin = query.dataOrigin.name.lowercase()
+        val latest = """SELECT __raw_data AS payload, session_ref, created_at_ms, data_origin,
+  session_created_at_ms, completed_at_ms,
+  recording_task, metrics.measurement_version AS method_version,
+  metrics.lexical_version AS lexical_version, metrics.quality AS quality,
+  row_number() OVER (PARTITION BY session_ref ORDER BY summary_version DESC, input_revision DESC, created_at_ms DESC, export_id DESC) AS latest_rank
+FROM clearline_session_summaries WHERE $scope"""
+        // A logical point is one current session summary, not an export/retry or
+        // correction. Counts cover the whole profile/provenance, independently
+        // of the small eight-week page; currently one point equals one session.
+        val counts = "SELECT uniqExact(session_ref) AS data_point_count, uniqExact(session_ref) AS session_count FROM ($latest) WHERE latest_rank = 1 AND data_origin = '$origin'"
+        val matching = "latest_rank = 1 AND data_origin = '$origin' AND recording_task = '${query.task.name.lowercase()}' AND method_version = '${query.measurementVersion}' AND lexical_version = '${query.lexicalVersion}' AND quality = 'accepted'"
+        val previous = """SELECT payload FROM ($latest)
+WHERE $matching AND session_ref != '${query.currentSessionId.value}'
+  AND session_created_at_ms >= ${query.windowStartMs} AND session_created_at_ms < ${query.beforeCreatedAtMs}
+  AND completed_at_ms >= session_created_at_ms AND completed_at_ms < ${query.beforeCreatedAtMs}
+ORDER BY session_created_at_ms DESC, session_ref ASC LIMIT ${query.limit}"""
+        val current = "SELECT payload FROM ($latest) WHERE $matching AND session_ref = '${query.currentSessionId.value}' AND session_created_at_ms IS NOT NULL AND completed_at_ms >= session_created_at_ms LIMIT 1"
+        return MemorySql(counts, previous, current)
+    }
+
+    fun count(value: JsonElement?): Long = (value as? JsonPrimitive)?.let {
+        // ClickHouse JSON may quote UInt64 to preserve precision.
+        it.content.toLongOrNull()?.takeIf { count -> count >= 0 }
+    } ?: sponsorFailure(ErrorCode.BAD_RESPONSE, "RawTree did not return exact nonnegative counts.")
+
+    fun decodeMemory(row: JsonElement, query: MemoryQuery): MemorySession = try {
+        val body = payload(row)
+        require(body.string("profile_ref") == profileRef(query.profileId))
+        val sessionId = SessionId(body.string("session_ref"))
+        val history = decode(row, BoundedHistoryQuery(sessionId, limit = 1, field = ExportField.TRANSCRIPT_SNIPPET))
+        val value = (history.projection as ExportedHistoryProjection.Measurements).value
+        MemorySession(sessionId, query.profileId, value.sessionCreatedAtMs ?: error("Missing session chronology"), value.summaryVersion,
+            history.inputRevision, history.dataOrigin, value.task,
+            value.metrics, value.transcriptSnippet, value.topKeyword, value.completedAtMs ?: error("Missing completion chronology"))
+    } catch (_: Exception) {
+        sponsorFailure(ErrorCode.BAD_RESPONSE, "RawTree returned an invalid memory projection.")
+    }
 
     fun table(field: ExportField): String = when (field) {
         ExportField.EVENTS -> "clearline_events"
@@ -112,13 +192,19 @@ internal object RawTreeExportWire {
                 }
                 is ExportProjection.Measurements -> {
                     valid(projection.summaryVersion > 0)
+                    val sessionCreated = projection.sessionCreatedAtMs
+                    val completed = projection.completedAtMs
+                    valid(sessionCreated == null || sessionCreated >= 0)
+                    valid(completed == null || (sessionCreated != null && completed >= sessionCreated))
                     put("summary_version", projection.summaryVersion)
                     put("metrics", metrics(projection.metrics, event.dataOrigin))
                     // The concrete requireExport guard must require BOTH
                     // MEASUREMENTS and TRANSCRIPT_SNIPPET grants for these.
                     put("transcript_snippet", projection.transcriptSnippet?.let(::JsonPrimitive) ?: JsonNull)
                     put("top_keyword", projection.topKeyword?.let(::JsonPrimitive) ?: JsonNull)
-                    put("recording_task", RecordingTask.CHECK_IN.name.lowercase())
+                    put("recording_task", projection.task.name.lowercase())
+                    put("session_created_at_ms", projection.sessionCreatedAtMs?.let(::JsonPrimitive) ?: JsonNull)
+                    put("completed_at_ms", projection.completedAtMs?.let(::JsonPrimitive) ?: JsonNull)
                 }
                 is ExportProjection.WorkflowCounts -> {
                     valid(projection.completedCount >= 0 && projection.pendingCount >= 0)
@@ -220,9 +306,7 @@ internal object RawTreeExportWire {
     }
 
     fun decode(row: JsonElement, request: BoundedHistoryQuery): ExportedHistoryRecord = try {
-        val envelope = row.jsonObject
-        val element = envelope["payload"] ?: error("Missing payload")
-        val body = if (element is JsonPrimitive && element.isString) Json.parseToJsonElement(element.content).jsonObject else element.jsonObject
+        val body = payload(row)
         require(body.long("schema_version") == 3L)
         require(body.string("session_ref") == sessionRef(request.sessionId))
         val exportId = ExportId(body.string("export_id"))
@@ -241,7 +325,10 @@ internal object RawTreeExportWire {
                 // snippet query field; ordinary measurement reads redact them.
                 ExportedHistoryProjection.Measurements(ExportProjection.Measurements(body.int("summary_version"), metric,
                     if (request.field == ExportField.TRANSCRIPT_SNIPPET) body.optionalString("transcript_snippet") else null,
-                    if (request.field == ExportField.TRANSCRIPT_SNIPPET) body.optionalString("top_keyword") else null))
+                    if (request.field == ExportField.TRANSCRIPT_SNIPPET) body.optionalString("top_keyword") else null,
+                    sessionCreatedAtMs = body.optionalLong("session_created_at_ms"),
+                    completedAtMs = body.optionalLong("completed_at_ms"),
+                    task = RecordingTask.valueOf(body.string("recording_task").uppercase())))
             }
             ExportField.WORKFLOW_COUNTS -> ExportedHistoryProjection.WorkflowCounts(ExportProjection.WorkflowCounts(Phase.valueOf(body.string("phase").uppercase()), body.int("completed_count"), body.int("pending_count")))
             ExportField.PUBLIC_RESOURCES -> {
@@ -265,8 +352,13 @@ internal object RawTreeExportWire {
     private fun decodeFact(element: JsonElement?): SourcedFact? = if (element == null || element == JsonNull) null else element.jsonObject.let { value ->
         SourcedFact(value.string("value"), value.getValue("passage_ids").jsonArray.map { it.jsonPrimitive.content })
     }
+    private fun payload(row: JsonElement): JsonObject {
+        val element = row.jsonObject["payload"] ?: error("Missing payload")
+        return if (element is JsonPrimitive && element.isString) Json.parseToJsonElement(element.content).jsonObject else element.jsonObject
+    }
     private fun JsonObject.string(key: String): String = getValue(key).jsonPrimitive.also { require(it.isString) }.content
     private fun JsonObject.optionalString(key: String): String? = if (get(key) == null || get(key) == JsonNull) null else string(key)
+    private fun JsonObject.optionalLong(key: String): Long? = if (get(key) == null || get(key) == JsonNull) null else long(key)
     private fun JsonObject.long(key: String): Long = getValue(key).jsonPrimitive.also { require(!it.isString) }.long.also { require(it >= 0) }
     private fun JsonObject.int(key: String): Int = long(key).also { require(it <= Int.MAX_VALUE) }.toInt()
     private fun JsonObject.number(key: String): Double = getValue(key).jsonPrimitive.also { require(!it.isString) }.double.also { require(it.isFinite()) }

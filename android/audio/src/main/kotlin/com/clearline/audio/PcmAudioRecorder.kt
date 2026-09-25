@@ -32,7 +32,11 @@ sealed interface CaptureState {
 }
 
 /** The Activity obtains permission first, and calls interrupt on backgrounding. Never a service. */
-class PcmAudioRecorder(context: Context, private val scope: CoroutineScope) {
+class PcmAudioRecorder(
+    context: Context,
+    private val scope: CoroutineScope,
+    private val onFinalized: (CompletedLocalClip) -> Unit = {},
+) {
     private val context = context.applicationContext
     val audioDirectory = File(context.noBackupFilesDir, "audio")
     private val mutableState = MutableStateFlow<CaptureState>(CaptureState.Idle)
@@ -56,8 +60,14 @@ class PcmAudioRecorder(context: Context, private val scope: CoroutineScope) {
         val running = commands.withLock { stopRequested.set(true); task }
         return running?.await() ?: (state.value as? CaptureState.Finalized)?.clip
     }
+    /** Nonblocking lifecycle edge: prevents a queued capture from activating the microphone. */
+    fun requestInterruption() {
+        interrupted.set(true)
+        stopRequested.set(true)
+    }
     suspend fun interrupt() {
-        val running = commands.withLock { if (task?.isActive == true) { interrupted.set(true); stopRequested.set(true) }; task }
+        requestInterruption()
+        val running = commands.withLock { task }
         running?.join()
     }
     /** Call once at startup before capture; complete audio is retained for durable recovery. */
@@ -81,6 +91,7 @@ class PcmAudioRecorder(context: Context, private val scope: CoroutineScope) {
             recorder = activeRecorder
             if (activeRecorder.state != AudioRecord.STATE_INITIALIZED || activeRecorder.sampleRate != PcmWave.SAMPLE_RATE)
                 throw ClearLineException(AppError(ErrorCode.NO_MICROPHONE, "16 kHz microphone capture is unavailable."))
+            if (interrupted.get()) throw CancellationException("Capture interrupted before microphone activation")
             activeRecorder.startRecording()
             if (activeRecorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) throw ClearLineException(AppError(ErrorCode.NO_MICROPHONE, "Microphone capture could not start."))
             val started = SystemClock.elapsedRealtime()
@@ -111,6 +122,9 @@ class PcmAudioRecorder(context: Context, private val scope: CoroutineScope) {
             try { Os.fsync(dirFd) } finally { Os.close(dirFd) }
             val clip = CompletedLocalClip(sessionId, clipId, target.canonicalPath, PcmWave.sha256(target), pcm.durationSeconds, origin, createdAtMs = System.currentTimeMillis())
             mutableState.value = CaptureState.Finalized(clip)
+            // One hardware completion event, separate from replaying UI state. The app handler
+            // only schedules durable admission. A handler failure cannot invalidate complete WAV.
+            runCatching { onFinalized(clip) }
             return clip
         } catch (cancelled: CancellationException) {
             mutableState.value = CaptureState.Interrupted(); throw cancelled

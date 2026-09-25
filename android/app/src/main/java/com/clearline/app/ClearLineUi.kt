@@ -35,7 +35,7 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
             containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                    listOf(Screen.HOME to Icons.Default.Home, Screen.CHECK_IN to Icons.Default.Mic, Screen.SUMMARY to Icons.Default.List, Screen.FOLLOW_UP to Icons.Default.Search, Screen.SETUP to Icons.Default.Settings).forEach { (screen, icon) ->
+                    listOf(Screen.HOME to Icons.Default.Home, Screen.CHECK_IN to Icons.Default.PlayArrow, Screen.SUMMARY to Icons.Default.List, Screen.FOLLOW_UP to Icons.Default.Search, Screen.SETUP to Icons.Default.Settings).forEach { (screen, icon) ->
                         NavigationBarItem(selected = state.screen == screen, onClick = { onEvent(UiEvent.Navigate(screen)) }, icon = { Icon(icon, null) }, label = { Text(when (screen) { Screen.CHECK_IN -> "Check-in"; Screen.FOLLOW_UP -> "Follow-up"; else -> screen.name.words() }, maxLines = 1) }, modifier = Modifier.testTag("nav-${screen.name}"))
                     }
                 }
@@ -56,6 +56,7 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
                     Screen.SUMMARY -> SummaryScreen(state, onEvent)
                     Screen.FOLLOW_UP -> FollowUpScreen(state, onEvent)
                     Screen.SETUP -> SetupScreen(state, onEvent)
+                    Screen.DIAGNOSTICS -> DiagnosticsScreen(state)
                 }
                 Text("Demo prototype · No health interpretation is provided.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(8.dp))
@@ -138,11 +139,13 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
         }
         Text("%02d:%02d".format(state.capture.elapsedMs / 60000, state.capture.elapsedMs / 1000 % 60), style = MaterialTheme.typography.headlineLarge)
         Text(state.capture.message ?: "Aim for 20–30 seconds. Recording stops at 30 seconds.")
-        Button(onClick = { if (state.capture.active) onEvent(UiEvent.StopRecording) else onEvent(UiEvent.StartRecording(recordingConsent, if (exportMetrics) setOf(ExportField.MEASUREMENTS) else emptySet())) }, Modifier.fillMaxWidth().testTag("record"), enabled = state.capture.active || (!state.busy && recordingConsent && (state.session == null || state.session.phase in setOf(Phase.RECORDING, Phase.AWAITING_INPUT)))) { Icon(if (state.capture.active) Icons.Default.Stop else Icons.Default.Mic, null); Spacer(Modifier.width(8.dp)); Text(if (state.capture.active) "Stop recording" else "Start recording") }
+        val canRecord = state.session == null || state.session.phase == Phase.RECORDING || (state.session.phase == Phase.AWAITING_INPUT && state.session.pendingInput?.reason == "replacement_recording")
+        Button(onClick = { if (state.capture.active) onEvent(UiEvent.StopRecording) else onEvent(UiEvent.StartRecording(recordingConsent, if (exportMetrics) setOf(ExportField.MEASUREMENTS) else emptySet())) }, Modifier.fillMaxWidth().testTag("record"), enabled = state.capture.active || (!state.busy && recordingConsent && canRecord)) { Icon(if (state.capture.active) Icons.Default.Close else Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text(if (state.capture.active) "Stop recording" else "Start recording") }
         if (state.capture.message?.contains("waiting for admission") == true) OutlinedButton({ onEvent(UiEvent.RetryAdmission) }, enabled = !state.busy) { Text("Retry complete clip admission") }
         if (state.session?.clips?.isNotEmpty() == true && !state.session.captureFinished) OutlinedButton({ onEvent(UiEvent.FinishCapture) }, enabled = !state.busy && !state.capture.active) { Text("Finish accepted capture") }
         if (state.asr.phase !in setOf(ModelPhase.READY, ModelPhase.INSTALLED)) Info("Transcription model: ${state.asr.phase.name.words()}. A complete clip can wait privately for model setup.")
     }
+    state.session?.let { MemoryCounts(it) }
 }
 
 @Composable private fun SummaryScreen(state: AppUiState, onEvent: (UiEvent) -> Unit) {
@@ -175,17 +178,36 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
         }
     }
     ExportChoices(session, state.busy, onEvent)
+    RawTreeMemoryPanel(session, state.busy, onEvent)
     Button({ onEvent(UiEvent.Navigate(Screen.FOLLOW_UP)) }, Modifier.fillMaxWidth()) { Text("Choose an optional follow-up →") }
     DeleteControl("Delete this check-in", "Delete this session’s local audio, transcript, history and unfinished work? Unsent exports are cancelled. Previously delivered cloud records cannot be recalled.") { onEvent(UiEvent.DeleteSession) }
 }
 
 @Composable private fun ExportChoices(session: SessionSnapshot, busy: Boolean, onEvent: (UiEvent) -> Unit) {
     var fields by remember(session.sessionId, session.consent.exportRevision) { mutableStateOf(session.consent.exportFields) }
+    val transcript = CallInsights.transcriptFor(session)
+    var snippet by remember(session.sessionId, session.inputRevision, session.consent.exportRevision) { mutableStateOf(session.consent.reviewedTranscriptSnippet ?: CallInsights.memorySnippet(transcript).orEmpty()) }
+    var keyword by remember(session.sessionId, session.inputRevision, session.consent.exportRevision) { mutableStateOf(session.consent.reviewedKeyword ?: CallInsights.topKeyword(transcript).orEmpty()) }
+    var textReviewed by remember(session.sessionId, session.inputRevision, session.consent.exportRevision, snippet, keyword) { mutableStateOf(false) }
+    val includesText = ExportField.TRANSCRIPT_SNIPPET in fields
+    val outgoingSnippet = if (includesText) snippet.trim().ifBlank { null } else null
+    val outgoingKeyword = if (includesText) keyword.trim().ifBlank { null } else null
+    val changed = fields != session.consent.exportFields || outgoingSnippet != session.consent.reviewedTranscriptSnippet || outgoingKeyword != session.consent.reviewedKeyword
     Panel {
         Text("Your cloud-export choice", style = MaterialTheme.typography.titleLarge)
         Text("Off means local-only records. Approval applies to new projections, with no automatic backfill.")
-        ExportField.entries.forEach { field -> Choice(field in fields, { checked -> fields = if (checked) fields + field else fields - field }, when (field) { ExportField.EVENTS -> "Minimal event IDs and status"; ExportField.MEASUREMENTS -> "Descriptive measurements"; ExportField.WORKFLOW_COUNTS -> "Phase and completed/pending counts"; ExportField.PUBLIC_RESOURCES -> "Public resource facts and citations" }, enabled = !busy) }
-        OutlinedButton({ onEvent(UiEvent.ExportConsent(fields, session.consent.exportRevision)) }, enabled = !busy && fields != session.consent.exportFields) { Text("Save export choices") }
+        ExportField.entries.forEach { field -> Choice(field in fields, { checked ->
+            fields = if (checked) fields + field else fields - field
+            if (field == ExportField.MEASUREMENTS && !checked) fields = fields - ExportField.TRANSCRIPT_SNIPPET
+            if (field == ExportField.TRANSCRIPT_SNIPPET) textReviewed = false
+        }, when (field) { ExportField.EVENTS -> "Minimal event IDs and status"; ExportField.MEASUREMENTS -> "Descriptive measurements"; ExportField.WORKFLOW_COUNTS -> "Phase and completed/pending counts"; ExportField.PUBLIC_RESOURCES -> "Public resource facts and citations"; ExportField.TRANSCRIPT_SNIPPET -> "Optional transcript snippet and keyword" }, enabled = !busy && (field != ExportField.TRANSCRIPT_SNIPPET || ExportField.MEASUREMENTS in fields)) }
+        if (includesText) {
+            Text("Review the exact text for RawTree. Remove names, contact details and private information yourself; automatic topic selection is not a privacy guarantee. Leave either field blank to omit it.")
+            OutlinedTextField(snippet, { snippet = it.take(200) }, Modifier.fillMaxWidth().testTag("export-snippet"), label = { Text("Snippet · up to 200 characters") }, minLines = 2)
+            OutlinedTextField(keyword, { keyword = it.take(40) }, Modifier.fillMaxWidth().testTag("export-keyword"), label = { Text("Keyword · up to 40 characters") }, singleLine = true)
+            Choice(textReviewed, { textReviewed = it }, "I approve these exact optional text values for RawTree.")
+        }
+        OutlinedButton({ onEvent(UiEvent.ExportConsent(fields, session.consent.exportRevision, outgoingSnippet, outgoingKeyword)) }, modifier = Modifier.testTag("save-export"), enabled = !busy && changed && (!includesText || textReviewed)) { Text("Save export choices") }
         Text("${session.cloudSync.delivered} delivered · ${session.cloudSync.pending} pending · ${session.cloudSync.failed} failed", style = MaterialTheme.typography.bodySmall)
         Text("Revocation cancels unsent exports. It cannot recall already delivered or in-flight requests.", style = MaterialTheme.typography.bodySmall)
     }
@@ -203,19 +225,38 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
 }
 
 @Composable private fun FollowUpScreen(state: AppUiState, onEvent: (UiEvent) -> Unit) {
-    Header("One next step, when you’re ready", "A little support, nearby.", "Only a category and city you approve go to public-resource search. Your voice and transcript stay local.")
+    Header("One next step, when you’re ready", "A little support, nearby.", "Review the exact public search before it goes to Nimble. The proposed concern comes from words in this check-in.")
     val session = state.session
     if (session == null) { Info("Choose a saved check-in first."); return }
     var category by rememberSaveable(session.sessionId.value) { mutableStateOf(session.approvedResources?.category ?: ResourceCategory.CAREGIVER_SUPPORT) }
     var city by rememberSaveable(session.sessionId.value) { mutableStateOf(session.approvedResources?.city ?: "") }
-    var approved by rememberSaveable(session.sessionId.value) { mutableStateOf(false) }
+    val transcript = CallInsights.transcriptFor(session)
+    val proposed = remember(transcript, city, category, session.comparison) {
+        if (city.isBlank()) null else runCatching { CallInsights.buildQuery(transcript, city, category, session.comparison) }.getOrNull()
+    }
+    var query by remember(proposed) { mutableStateOf(proposed?.query.orEmpty()) }
+    var approved by remember(session.sessionId, session.inputRevision, proposed, query) { mutableStateOf(false) }
     Panel {
         Text("What would be helpful?", style = MaterialTheme.typography.titleLarge)
         ResourceCategory.entries.forEach { value -> Row(Modifier.fillMaxWidth().clickable { category = value; approved = false }, verticalAlignment = Alignment.CenterVertically) { RadioButton(category == value, { category = value; approved = false }); Text(value.name.words()) } }
         OutlinedTextField(city, { city = it.take(120); approved = false }, Modifier.fillMaxWidth().testTag("resource-city"), label = { Text("City") }, singleLine = true)
-        Info("Public search: ${category.name.words()} in ${city.ifBlank { "your chosen city" }}. This reveals that public search interest to Nimble.")
-        Choice(approved, { approved = it }, "I approve this category and city for this search.")
-        Button({ onEvent(UiEvent.RequestResources(category, city.trim(), session.inputRevision)); approved = false }, Modifier.fillMaxWidth().testTag("search"), enabled = !state.busy && approved && city.isNotBlank() && session.metrics != null) { Text("Find public resources") }
+        proposed?.let { draft ->
+            OutlinedTextField(query, { query = it.take(400).filterNot(Char::isISOControl); approved = false }, Modifier.fillMaxWidth().testTag("resource-query"), label = { Text("Exact query to send to Nimble") }, minLines = 2)
+            Text("Based on", style = MaterialTheme.typography.titleMedium)
+            if (draft.basis.fallback) Text("No supported concern phrase was found. This is a category-and-city search.")
+            else {
+                Text("A ${draft.basis.concern.name.words().lowercase()} topic mentioned in this check-in.")
+                draft.basis.transcriptExcerpt?.let { Text("Local excerpt: “$it”") }
+            }
+            draft.basis.topMetric?.let { Text("Local comparison: ${it.words()} differs by ${draft.basis.deltaPercent.display()}% across ${draft.basis.baselineSessionCount} prior sessions. This is descriptive context, not a health finding.", style = MaterialTheme.typography.bodySmall) }
+            Text("The excerpt and local comparison stay on this phone. The exact query and city reveal your search interest to Nimble; remove private details before approving.", style = MaterialTheme.typography.bodySmall)
+        }
+        Choice(approved, { approved = it }, "I approve this exact query and city for Nimble.", enabled = proposed != null && query.isNotBlank())
+        Button({ proposed?.let { onEvent(UiEvent.RequestResources(it.copy(query = query.trim()), session.inputRevision)) }; approved = false }, Modifier.fillMaxWidth().testTag("search"), enabled = !state.busy && approved && proposed != null && query.isNotBlank() && session.metrics != null) { Text("Find public resources") }
+    }
+    session.approvedResources?.let { request ->
+        val committed = session.actions.any { it.status == ActionStatus.SUCCEEDED && (it.result as? ActionResult.Search)?.value?.approvalId == request.approvalId }
+        Panel { Text(if (committed) "Nimble searched" else "Approved search · not yet committed", style = MaterialTheme.typography.titleMedium); Text(request.queryDraft?.query ?: "${request.category.name.words()} near ${request.city}"); Text("City: ${request.city}", style = MaterialTheme.typography.bodySmall) }
     }
     SessionStatus(session, state.busy, onEvent)
     session.pendingInput?.takeIf { session.phase == Phase.AWAITING_INPUT && it.reason !in setOf("replacement_recording", "missing_model", "audio_model_missing") }?.let { input ->
@@ -269,11 +310,12 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
         var nimble by remember(state.sponsorConfiguration.nimbleEnabled) { mutableStateOf(state.sponsorConfiguration.nimbleEnabled) }
         var rawTree by remember(state.sponsorConfiguration.rawTreeEnabled) { mutableStateOf(state.sponsorConfiguration.rawTreeEnabled) }
         OutlinedTextField(database, { database = it.take(128) }, label = { Text("RawTree database") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Choice(nimble, { nimble = it }, "Enable Nimble public research", "Each category/city request still needs its own approval.")
+        Choice(nimble, { nimble = it }, "Enable Nimble public research", "Each exact query and city still need approval.")
         Choice(rawTree, { rawTree = it }, "Enable RawTree exports", "Per-session export choices remain off until separately approved.")
         OutlinedButton({ onEvent(UiEvent.SetSponsorConfiguration(SponsorConfiguration(nimble, rawTree, database.ifBlank { null }))) }, enabled = !state.busy && database.matches(Regex("[A-Za-z0-9_-]{1,128}"))) { Text("Save service settings") }
     }
-    Panel { Text("What stays and what leaves", style = MaterialTheme.typography.titleLarge); Text("Audio, transcripts, prompts, model output and full checkpoints stay in private phone storage. Audio is removed after terminal processing no longer needs it. Other local records remain until deletion."); Text("Only an approved public category/city and source URLs go to Nimble. Only separately approved fields go to RawTree. Opening a source uses your external browser and leaves this app’s privacy boundary."); Text("Backups and device transfer are excluded by app policy; actual-device verification is still required. Deletion does not promise forensic erasure.", style = MaterialTheme.typography.bodySmall) }
+    Panel { Text("What stays and what leaves", style = MaterialTheme.typography.titleLarge); Text("Audio, full transcripts, prompts, model output and full checkpoints stay in private phone storage. Audio is removed after terminal processing no longer needs it. Other local records remain until deletion."); Text("An exact approved concern query, city and source URLs go to Nimble. Only separately selected fields go to RawTree, including an optional exact snippet and keyword you review. Opening a source uses your external browser and leaves this app’s privacy boundary."); Text("Backups and device transfer are excluded by app policy; actual-device verification is still required. Deletion does not promise forensic erasure.", style = MaterialTheme.typography.bodySmall) }
+    TextButton({ onEvent(UiEvent.Navigate(Screen.DIAGNOSTICS)) }) { Text("Read native diagnostics") }
 }
 
 @Composable private fun ModelPanel(title: String, status: ModelStatus, busy: Boolean, onEvent: (UiEvent) -> Unit) {
@@ -281,7 +323,7 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
         Text(title, style = MaterialTheme.typography.titleLarge)
         Text(status.phase.name.words(), Modifier.testTag("model-${status.kind.name}"))
         status.error?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
-        status.identity?.let { Text("${it.modelId.value} · ${it.quantization} · ${it.language}", style = MaterialTheme.typography.bodySmall); Text("Verified file: ${it.filename}", style = MaterialTheme.typography.bodySmall) }
+        status.identity?.let { Text("${it.modelId.value} · ${it.quantization} · ${it.language}", style = MaterialTheme.typography.bodySmall); Text("${if (status.phase in setOf(ModelPhase.INSTALLED, ModelPhase.READY)) "Verified" else "Pinned"} file: ${it.filename}", style = MaterialTheme.typography.bodySmall) }
         if (status.progressBytes > 0) Text("${status.progressBytes / (1024 * 1024)} MiB received", style = MaterialTheme.typography.bodySmall)
         if (status.phase in setOf(ModelPhase.MISSING, ModelPhase.FAILED)) {
             Text("Download or import the pinned model. Its digest is checked before it can be loaded. No voice data accompanies a model download.", style = MaterialTheme.typography.bodySmall)
@@ -292,6 +334,84 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
         if (status.phase == ModelPhase.READY) OutlinedButton({ onEvent(UiEvent.UnloadModel(status.kind)) }, enabled = !busy) { Text("Unload model") }
     }
 }
+@Composable private fun MemoryCounts(session: SessionSnapshot) {
+    Panel {
+        Text("RawTree memory", style = MaterialTheme.typography.titleLarge)
+        val memory = session.rawTreeMemory
+        Text("${memory?.dataPointCount?.toString() ?: "Unavailable"} confirmed data points · ${memory?.sessionCount?.toString() ?: "Unavailable"} distinct sessions", Modifier.testTag("memory-count"))
+        Text("Count scope: exported logical summaries for this profile and ${session.dataOrigin.name.words().lowercase()} origin. Revisions and repeated reads are not new data points.", style = MaterialTheme.typography.bodySmall)
+        Text("${session.cloudSync.pending} queued · ${session.cloudSync.delivered} acknowledged exports · ${session.cloudSync.failed} failed", style = MaterialTheme.typography.bodySmall)
+        memory?.let { Text("${if (it.cached) "Cached" else "Last queried"} · ${timestamp(it.retrievedAtMs)}", style = MaterialTheme.typography.bodySmall) }
+        Text("Counts update after a completed clip is processed, exported and queried. This version does not stream ten-second segments.", style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable private fun RawTreeMemoryPanel(session: SessionSnapshot, busy: Boolean, onEvent: (UiEvent) -> Unit) {
+    MemoryCounts(session)
+    val memory = session.rawTreeMemory
+    Panel {
+        Text("From RawTree (${memory?.previousSessions?.size ?: 0} prior sessions)", style = MaterialTheme.typography.titleLarge)
+        Text("Up to 8 latest eligible prior sessions in the preceding 56 days, matching profile, task, methods and origin. This bounded view does not establish complete eight-week coverage.", style = MaterialTheme.typography.bodySmall)
+        when (memory?.status) {
+            null -> Text("Exported history has not been read.")
+            RawTreeMemoryStatus.UNAVAILABLE -> Text("Exported history unavailable. Local history and recovery remain on this phone.")
+            RawTreeMemoryStatus.INSUFFICIENT_HISTORY -> Text("Insufficient exported history. Two eligible prior sessions are needed for this comparison.")
+            RawTreeMemoryStatus.AVAILABLE -> Unit
+        }
+        if (memory != null) {
+            Text("Query window: ${timestamp(memory.windowStartMs)} to ${timestamp(memory.windowEndMs)}", style = MaterialTheme.typography.bodySmall)
+            if (memory.previousSessions.isNotEmpty()) Text("Returned history span: ${timestamp(memory.previousSessions.minOf { it.timestampMs })} to ${timestamp(memory.previousSessions.maxOf { it.timestampMs })}", style = MaterialTheme.typography.bodySmall)
+            val currentCloud = memory.currentSession?.takeIf { it.summaryVersion == session.summaryVersion && it.metrics == session.metrics }
+            Text(if (currentCloud != null) "Current: confirmed RawTree summary ${currentCloud.summaryVersion}" else "Current: local accepted summary; current cloud version is not confirmed.", style = MaterialTheme.typography.bodySmall)
+            Row(Modifier.fillMaxWidth()) { Text("Measurement", Modifier.weight(1f)); Text("Prior mean", Modifier.weight(1f)); Text("Current", Modifier.weight(1f)) }
+            listOf(Triple("Recording wpm", memory.meanRecordingWpm, session.metrics?.recordingWpm), Triple("RMS", memory.meanEnergyRms, session.metrics?.energyRms)).forEach { (label, mean, current) ->
+                val digits = if (label == "RMS") 4 else 1
+                Row(Modifier.fillMaxWidth()) { Text(label, Modifier.weight(1f)); Text(mean.display(digits), Modifier.weight(1f)); Text(current.display(digits), Modifier.weight(1f)) }
+                val delta = if (mean != null && current != null) current - mean else null
+                val percent = if (mean != null && mean > 0 && delta != null) (delta / mean * 100).takeIf { it.isFinite() } else null
+                Text("Difference: ${delta.display(digits)} · percent: ${percent?.let { "${it.display()}%" } ?: "Unavailable"}", style = MaterialTheme.typography.bodySmall)
+            }
+            Text("Pauses, pitch, emotion and drift score: not measured.", style = MaterialTheme.typography.bodySmall)
+            Text("Exported session timeline", style = MaterialTheme.typography.titleMedium)
+            (listOfNotNull(currentCloud) + memory.previousSessions).forEach { row ->
+                Text("${if (row.sessionId == session.sessionId) "Current · " else ""}${timestamp(row.timestampMs)} · ${row.metrics.recordingWpm.display()} recording wpm")
+                if (ExportField.TRANSCRIPT_SNIPPET in session.consent.exportFields) {
+                    row.topKeyword?.let { Text("Approved keyword: $it", style = MaterialTheme.typography.bodySmall) }
+                    row.transcriptSnippet?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                }
+                Text("RawTree · summary ${row.summaryVersion}", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        OutlinedButton({ onEvent(UiEvent.RefreshExportedMemory) }, enabled = !busy && session.metrics != null, modifier = Modifier.testTag("refresh-memory")) { Text("Refresh exported history") }
+        TextButton({ onEvent(UiEvent.Navigate(Screen.DIAGNOSTICS)) }) { Text("Read query diagnostics") }
+    }
+}
+
+@Composable private fun DiagnosticsScreen(state: AppUiState) {
+    Header("Read-only diagnostics", "What was actually returned.", "Opening this screen never sends a query or starts a job.")
+    val session = state.session
+    val memory = session?.rawTreeMemory
+    Panel {
+        Text("RawTree", style = MaterialTheme.typography.titleLarge)
+        if (memory == null) Text("No memory query has completed for the selected check-in.")
+        else {
+            Text("Template: ${memory.diagnostics.templateId.name}")
+            Text("Window: ${timestamp(memory.windowStartMs)} to ${timestamp(memory.windowEndMs)} · limit 8")
+            Text("Returned rows: ${memory.diagnostics.returnedRows?.toString() ?: "Unavailable"} · eligible prior sessions: ${memory.previousSessions.size}")
+            Text("Measured latency: ${memory.diagnostics.latencyMs?.let { "$it ms" } ?: "Unavailable"}")
+            Text("${if (memory.cached) "Cached" else "Queried"}: ${timestamp(memory.retrievedAtMs)}")
+            Text("Status: ${memory.status.name.words()} · error: ${memory.diagnostics.error?.name ?: "None"}")
+        }
+    }
+    Panel {
+        Text("Last committed sponsor action", style = MaterialTheme.typography.titleLarge)
+        val action = session?.actions?.lastOrNull { it.result is ActionResult.Search || it.result is ActionResult.Extract }
+        if (action == null) Text("No committed search or extraction.")
+        else { Text("${action.proposal.javaClass.simpleName} · ${action.status.name.words()}"); Text(timestamp(action.completedAtMs ?: action.createdAtMs)) }
+        Text("Only template identifiers, counts, times and typed errors appear here. Private requests, credentials and transcripts are excluded.", style = MaterialTheme.typography.bodySmall)
+    }
+}
+
 @Composable private fun DeleteControl(label: String, explanation: String, confirm: () -> Unit) {
     var show by remember { mutableStateOf(false) }
     TextButton({ show = true }) { Text(label, color = MaterialTheme.colorScheme.error) }

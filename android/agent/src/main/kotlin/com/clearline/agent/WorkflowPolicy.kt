@@ -21,7 +21,10 @@ internal object WorkflowPolicy {
             ProposedAction.CompareRecordingMetrics -> if (research || snapshot.metrics == null || checkpoint.baseline == null || snapshot.comparison != null) reject("Comparison is not permitted now.")
             ProposedAction.SearchPublicResources -> {
                 val request = snapshot.approvedResources ?: reject("Approve a resource request first.")
-                if (!research || request.sessionId != snapshot.sessionId || request.inputRevision != snapshot.researchRevision || snapshot.resources.isNotEmpty()) reject("Search does not match the approved current request.")
+                request.queryDraft?.let { draft ->
+                    if (draft.transcriptHash != CallInsights.transcriptHash(CallInsights.transcriptFor(snapshot)) || draft != CallInsights.buildQuery(CallInsights.transcriptFor(snapshot), request.city, request.category, snapshot.comparison).copy(query = draft.query)) reject("The approved query preview is stale.")
+                }
+                if (!research || request.sessionId != snapshot.sessionId || request.inputRevision != snapshot.researchRevision || snapshot.activeActions(WorkflowScope.RESEARCH).any { it.result is ActionResult.Search && it.status == ActionStatus.SUCCEEDED }) reject("Search does not match the approved current request.")
             }
             is ProposedAction.ExtractPublicPage -> if (!research || snapshot.approvedResources?.inputRevision != snapshot.researchRevision || snapshot.resources.none { it.candidateId == action.candidateId }) reject("The source is not an approved search candidate.")
             is ProposedAction.RequestUserInput -> if (action.input.question.contains("<|") || action.input.question.any { it.isISOControl() }) reject("Invalid missing-input question.")

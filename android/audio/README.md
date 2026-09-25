@@ -17,12 +17,14 @@ Use one `SharedModelArbiter` instance for Whisper and Liquid:
 ```kotlin
 val runtime = WhisperAsrRuntime(context, sharedArbiter)
 val processor = WhisperAudioProcessor(context, runtime)
-val recorder = PcmAudioRecorder(context, foregroundScope)
+val recorder = PcmAudioRecorder(context, foregroundScope) { clip ->
+    // Schedule durable admission from the hardware completion event.
+}
 ```
 
 Setup may call `refreshInstalledStatus()` (local verification, off main thread). User-selected download passes `WhisperModelManifest.approvedDownload()` to `install`. A system document picker may instead pass an `ApprovedModelArtifact` using the exact same identity and a `content://` URI. Only the pinned HTTPS repository URL is accepted for network setup; redirects are restricted to Hugging Face HTTPS domains. Installation streams into `.part`, checks free space, exact 77,704,715-byte size and SHA-256, fsyncs, and atomically renames before readiness. Installing does not load; explicitly call `load(identity.modelId)`. Missing/unverified files never report ready.
 
-The Activity obtains `RECORD_AUDIO` permission before `start(sessionId, clipId)`. Collect `recorder.state`: `Recording(elapsedMs, levelRms)`; `Finalized(clip)` on Stop or automatic 30-second completion; `Interrupted`; or safe `Failed` metadata. UI observation does not admit clips. Pass a finalized clip to the command port once and rely on durable admission deduplication. Backgrounding must call `interrupt()` and cancel local model work. Do not automatically resume on foregrounding.
+The Activity obtains `RECORD_AUDIO` permission before `start(sessionId, clipId)`. Collect `recorder.state`: `Recording(elapsedMs, levelRms)`; `Finalized(clip)` on Stop or automatic 30-second completion; `Interrupted`; or safe `Failed` metadata. The constructor completion callback fires once per successful capture; the app uses that hardware event to schedule durable admission. Its exception cannot turn a completed recording into a capture failure. `StateFlow` observation is UI-only and must not admit clips or create jobs. The app retains pending completion until durable admission and relies on durable admission deduplication. Backgrounding must synchronously call `requestInterruption()` at the lifecycle edge, then await `interrupt()` and cancel local model work. The atomic interruption flag is rechecked before microphone activation, including when capture was queued on an IO dispatcher. Do not automatically resume on foregrounding.
 
 Only true 16 kHz mono PCM16 capture is requested; unsupported devices fail visibly. There is no relabeling/resampling, cloud recognizer, SpeechRecognizer, laptop service, or HTTP transcription path. AudioRecord is released on every path. Nonblocking reads are bounded by a 45-second wall timeout. Explicit interruption discards the incomplete clip, whereas an already completed clip remains available for admission/recovery.
 
@@ -41,6 +43,8 @@ JNI uses bounded 90-second inference with native abort/encoder callbacks. Kotlin
 ## Verification
 
 Host JVM tests exercise real PCM duration/RMS/WPM, silence/click rejection, truncated/relabeled WAV, `.part` rejection, identical promotion, reused-ID conflict, and verified/cancelled/oversize model installation. They do not use a real microphone/model.
+
+Actual September 25, 2026 checks: **9/9 host JVM tests passed** using Kotlin 2.2.10 / JDK 17 and the real core source in an isolated Gradle harness (`/tmp/clearline-audio-host-check`), because the Android SDK license/install gate prevented running Android Gradle tasks. The actual pinned whisper.cpp and JNI bridge also compiled and linked on the Mac arm64 host with AppleClang 15.0.0. Run `JAVA_HOME=<JDK17> ./audio/scripts/verify-host-jni.sh` to repeat: **10/10 missing-model/context and cancellation/unload JNI smoke cycles passed**. `nm -gU` showed exactly five exported JNI methods and no ggml/whisper runtime exports. These host checks use no weights or real recordings and do not establish Android native linking, microphone behavior, transcription, or APK coexistence. Android instrumentation and S24 gates remain **NOT RUN**.
 
 Android instrumentation contains native-library/missing-model checks plus explicit live tests guarded by runner argument `-e consentedAudio true`. Run only with a consenting speaker, permission already granted through the app, and the verified model installed. Read a non-sensitive English sentence during the ten-second recording. Live tests are skipped without the flag; skipped tests do not count as acceptance. Device lifecycle, revoked permission, low storage, force-stop recovery, airplane-mode speech, and 30-second auto-stop require separate S24 acceptance entries.
 

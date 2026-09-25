@@ -20,14 +20,14 @@ object LocalMeasurements {
         val count = Regex("[\\p{L}\\p{N}]+(?:['’][\\p{L}\\p{N}]+)*").findAll(text).count()
         if (count == 0) throw ClearLineException(AppError(ErrorCode.INVALID_INPUT, "The corrected transcript must contain words."))
         return result.copy(transcript = text, metrics = result.metrics.copy(wordCount = count,
-            recordingWpm = count * 60.0 / result.metrics.durationSeconds), processedAtMs = nowMs)
+            recordingWpm = count * 60.0 / result.metrics.durationSeconds), processedAtMs = result.processedAtMs)
     }
 
     fun compare(current: RecordingMetrics, baseline: BaselineSummary): DescriptiveComparison {
         if (baseline.status == BaselineStatus.INSUFFICIENT_HISTORY) return DescriptiveComparison(baseline, null, null)
         fun difference(value: Double, values: List<Double>): MetricDifference {
             val mean = values.average()
-            val variance = values.sumOf { (it - mean) * (it - mean) } / (values.size - 1)
+            val variance = values.sumOf { (it - mean) * (it - mean) } / values.size
             val deviation = sqrt(variance)
             return MetricDifference(value, mean, value - mean, if (deviation == 0.0) null else (value - mean) / deviation)
         }

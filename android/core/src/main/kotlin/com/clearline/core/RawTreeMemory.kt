@@ -145,12 +145,19 @@ object RawTreeMemoryMath {
             return unavailable(query, retrievedAtMs, diagnostics.copy(error = ErrorCode.BAD_RESPONSE), cached)
         }
 
-        val versionOrder = compareBy<MemorySession> { it.summaryVersion }
-            .thenBy { it.inputRevision }.thenBy { it.completedAtMs ?: Long.MAX_VALUE }
-        val latest = (rows + listOfNotNull(currentSession))
+        val versionsBySession = (rows + listOfNotNull(currentSession))
             .filter { it.profileId == query.profileId }
             .groupBy { it.sessionId }
-            .values.map { versions -> versions.maxWith(versionOrder) }
+        val conflictingReplay = versionsBySession.values.any { versions ->
+            versions.groupBy { Triple(it.summaryVersion, it.inputRevision, it.completedAtMs) }
+                .values.any { replays -> replays.distinct().size > 1 }
+        }
+        if (conflictingReplay) {
+            return unavailable(query, retrievedAtMs, diagnostics.copy(error = ErrorCode.BAD_RESPONSE), cached)
+        }
+        val versionOrder = compareBy<MemorySession> { it.summaryVersion }
+            .thenBy { it.inputRevision }.thenBy { it.completedAtMs == null }.thenBy { it.completedAtMs }
+        val latest = versionsBySession.values.map { versions -> versions.maxWith(versionOrder) }
 
         fun matches(row: MemorySession): Boolean = row.dataOrigin == query.dataOrigin &&
             row.task == query.task && row.metrics.quality == AudioQuality.ACCEPTED &&
@@ -168,6 +175,16 @@ object RawTreeMemoryMath {
             return unavailable(query, retrievedAtMs, diagnostics.copy(error = ErrorCode.BAD_RESPONSE), cached)
         }
         val enough = previous.size >= 2
+        // Scale nonnegative inputs before summing: even three MAX_VALUE / 3 terms can overflow.
+        fun positiveMean(values: List<Double>): Double {
+            val scale = values.max()
+            return if (scale == 0.0) 0.0 else scale * (values.sumOf { it / scale } / values.size)
+        }
+        val meanWpm = if (enough) positiveMean(previous.map { it.metrics.recordingWpm }) else null
+        val meanRms = if (enough) positiveMean(previous.map { it.metrics.energyRms }) else null
+        if (meanWpm?.isFinite() == false || meanRms?.isFinite() == false) {
+            return unavailable(query, retrievedAtMs, diagnostics.copy(error = ErrorCode.BAD_RESPONSE), cached)
+        }
         return RawTreeMemorySnapshot(
             profileId = query.profileId,
             currentSessionId = query.currentSessionId,
@@ -176,9 +193,8 @@ object RawTreeMemoryMath {
             sessionCount = sessionCount,
             previousSessions = previous,
             currentSession = current,
-            // Divide before summing to avoid overflow for otherwise finite input metrics.
-            meanRecordingWpm = if (enough) previous.sumOf { it.metrics.recordingWpm / previous.size } else null,
-            meanEnergyRms = if (enough) previous.sumOf { it.metrics.energyRms / previous.size } else null,
+            meanRecordingWpm = meanWpm,
+            meanEnergyRms = meanRms,
             windowStartMs = query.windowStartMs,
             windowEndMs = query.beforeCreatedAtMs,
             retrievedAtMs = retrievedAtMs,

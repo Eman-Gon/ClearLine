@@ -12,9 +12,10 @@ import java.net.SocketTimeoutException
 class SponsorHttpTest {
     private class Credentials : CredentialProvider {
         var lastCopy: ByteArray? = null
-        override suspend fun <T> withCredential(service: Sponsor, block: suspend (ByteArray) -> T): T {
+        var current = true
+        override suspend fun <T> withCredential(service: Sponsor, block: suspend (ByteArray, () -> Unit) -> T): T {
             val bytes = "synthetic-credential".toByteArray(); lastCopy = bytes
-            return try { block(bytes) } finally { bytes.fill(0) }
+            return try { block(bytes) { if (!current) sponsorFailure(ErrorCode.STALE_REVISION, "Credential was cleared.") } } finally { bytes.fill(0) }
         }
     }
     private fun transport(credentials: Credentials = Credentials(), response: (Request) -> Response): OkHttpSponsorTransport =
@@ -51,6 +52,18 @@ class SponsorHttpTest {
             try { http.post(Sponsor.NIMBLE, "/v2/search", buildJsonObject {}) { sponsorFailure(ErrorCode.STALE_REVISION, "Consent revoked.") }; fail() }
             catch (error: ClearLineException) { assertEquals(ErrorCode.STALE_REVISION, error.error.code) }
             assertEquals(0, requests)
+        } finally { http.close() }
+    }
+
+    @Test fun credentialClearedWhileAuthorizationRunsDoesNotDispatch() = runTest {
+        var requests = 0
+        val credentials = Credentials()
+        val http = transport(credentials) { requests++; response(it) }
+        try {
+            try { http.post(Sponsor.NIMBLE, "/v2/search", buildJsonObject {}) { credentials.current = false }; fail() }
+            catch (error: ClearLineException) { assertEquals(ErrorCode.STALE_REVISION, error.error.code) }
+            assertEquals(0, requests)
+            assertTrue(credentials.lastCopy!!.all { it == 0.toByte() })
         } finally { http.close() }
     }
 

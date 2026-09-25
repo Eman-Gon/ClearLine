@@ -1,6 +1,6 @@
 package com.clearline.inference
 
-/** JNI boundary only. All calls except cancellation must hold ModelExecutionGate. */
+/** JNI boundary only. All calls except cancellation must hold SharedModelArbiter. */
 internal class NativeLiquidBridge {
     external fun nativeCreate(): Long
     external fun nativeLoad(handle: Long, pathUtf8: ByteArray, contextSize: Int, threads: Int)

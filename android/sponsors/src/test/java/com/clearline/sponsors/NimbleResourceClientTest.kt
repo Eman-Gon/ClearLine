@@ -3,7 +3,12 @@ package com.clearline.sponsors
 import com.clearline.core.*
 import java.net.InetAddress
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -33,11 +38,13 @@ class NimbleResourceClientTest {
 
     private class Http(var response: JsonObject) : SponsorHttp {
         val requests = mutableListOf<Pair<String, JsonObject>>()
+        var attempts = 0
         var error: Exception? = null
         override suspend fun post(service: Sponsor, path: String, body: JsonObject, database: String?, authorize: suspend () -> Unit): JsonObject {
             assertEquals(Sponsor.NIMBLE, service)
             assertNull(database)
             authorize()
+            attempts++
             error?.let { throw it }
             requests += path to body
             return response
@@ -190,6 +197,22 @@ class NimbleResourceClientTest {
         assertTrue(PublicSourceUrls.isPublic(InetAddress.getByName("2606:4700:4700::1111")))
     } }
 
+    @Test fun publicLiteralAddressesDoNotIssueDnsNameQueries() { runBlocking {
+        val neverDns = PublicSourceDns { error("Literal IP addresses must not be queried as DNS names") }
+        PublicSourceUrls.verifyDns(PublicSourceUrls.normalize("https://93.184.216.34/"), neverDns)
+        PublicSourceUrls.verifyDns(PublicSourceUrls.normalize("https://[2606:4700:4700::1111]/"), neverDns)
+    } }
+
+    @Test fun labelsAndPhoneNumbersMustNotBePartialSubstringMatches() { runBlocking {
+        for (text in listOf("Smartphone: 415-555-0123", "Phone: 4155550123456", "Webaddress: 123 Main St, Oakland\nAfterhours: a private note")) {
+            val response = buildJsonObject { put("data", buildJsonObject { put("markdown", text) }) }
+            val result = NimbleResourceClient(Http(response), Authorization(), dns).extract(source())
+            assertNull(result.facts.phone)
+            assertNull(result.facts.address)
+            assertNull(result.facts.hours)
+        }
+    } }
+
     @Test fun cancellationAndTypedNetworkErrorsPropagateWithoutHiddenRetries() { runBlocking {
         val http = Http(json("{}")).apply { error = CancellationException("cancelled by test") }
         try { NimbleResourceClient(http, Authorization(), dns).search(request); fail("Cancellation must propagate") }
@@ -197,7 +220,20 @@ class NimbleResourceClientTest {
         http.error = ClearLineException(AppError(ErrorCode.NETWORK_UNAVAILABLE, "Network unavailable.", true))
         val error = fails(ErrorCode.NETWORK_UNAVAILABLE) { NimbleResourceClient(http, Authorization(), dns).search(request) }
         assertTrue(error.retryable)
+        assertEquals(2, http.attempts)
         assertTrue(http.requests.isEmpty())
+    } }
+
+    @Test fun cancellingPendingDnsStopsExtractionBeforeHttpDispatch() { runBlocking {
+        val http = Http(json("{}"))
+        val entered = CompletableDeferred<Unit>()
+        val slowDns = PublicSourceDns { entered.complete(Unit); awaitCancellation() }
+        withTimeout(1000) {
+            val job = launch { NimbleResourceClient(http, Authorization(), slowDns).extract(source()) }
+            entered.await()
+            job.cancelAndJoin()
+        }
+        assertEquals(0, http.attempts)
     } }
 
     @Test fun excessiveContentAndMalformedTextFieldsFailClosed() { runBlocking {

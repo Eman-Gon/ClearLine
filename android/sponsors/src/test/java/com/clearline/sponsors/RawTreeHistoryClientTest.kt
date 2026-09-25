@@ -14,6 +14,9 @@ class RawTreeHistoryClientTest {
         override suspend fun requireResearch(request: ApprovedResourceRequest) = Unit
         override suspend fun requireSource(source: ApprovedSource) = Unit
         override suspend fun requireHistory(request: BoundedHistoryQuery) = Unit
+        override suspend fun requireMemory(request: MemoryQuery) {
+            if (!allowed) sponsorFailure(ErrorCode.CONSENT_REQUIRED, "Memory read not approved.")
+        }
         override suspend fun requireExport(event: ApprovedExport) {
             approved = event
             if (!allowed) sponsorFailure(ErrorCode.CONSENT_REQUIRED, "Export not approved.")
@@ -69,9 +72,9 @@ class RawTreeHistoryClientTest {
         assertEquals(500L, receipt.deliveredAtMs)
         val text = http.sent[0].toString()
         assertFalse(text.contains(input.profileId.value))
-        assertFalse(text.contains(input.sessionId.value))
+        assertEquals(input.sessionId.value, http.sent[0]["session_ref"]!!.jsonPrimitive.content)
         assertFalse(text.contains("consent_revision"))
-        assertEquals(setOf("schema_version", "export_id", "session_ref", "input_revision", "data_origin", "created_at_ms", "projection_type", "event_id", "event_name", "event_status", "timestamp_ms"), http.sent[0].keys)
+        assertEquals(setOf("schema_version", "export_id", "session_ref", "profile_ref", "input_revision", "data_origin", "created_at_ms", "projection_type", "event_id", "event_name", "event_status", "timestamp_ms"), http.sent[0].keys)
     }
 
     @Test fun revokedOrChangedConsentAtDispatchDoesNotSend() = runTest {
@@ -124,7 +127,8 @@ class RawTreeHistoryClientTest {
         assertEquals("/v1/tables/clearline_resource_versions", http.paths.single())
         assertEquals(JsonNull, body["facts"]!!.jsonObject["address"])
         assertFalse(body.toString().contains(evidence.approvalId.value))
-        assertFalse(body.toString().contains("Local display"))
+        assertEquals("Local display title", body["title"]!!.jsonPrimitive.content)
+        assertEquals("Local display description", body["description"]!!.jsonPrimitive.content)
         val invented = evidence.copy(facts = PublicFacts(phone = SourcedFact("(555) 000-0000", listOf("passage-1"))))
         assertEquals(ErrorCode.INVALID_INPUT, failure { client(http, gate).append(event(projection = ExportProjection.PublicResource(invented))) }.error.code)
     }
@@ -133,6 +137,102 @@ class RawTreeHistoryClientTest {
         val http = Http().apply { response = buildJsonObject { put("inserted", 0) } }
         val gate = Gate().apply { allowed = true }
         assertEquals(ErrorCode.BAD_RESPONSE, failure { client(http, gate).append(event()) }.error.code)
+    }
+
+    @Test fun boundedHistoryDeduplicatesAndRejectsWrongSession() = runTest {
+        val input = event()
+        val http = Http()
+        val gate = Gate().apply { allowed = true }
+        val encoded = RawTreeExportWire.encode(input)
+        http.response = buildJsonObject { put("data", JsonArray(listOf(buildJsonObject { put("payload", encoded) }, buildJsonObject { put("payload", encoded) }))) }
+        val result = client(http, gate).query(BoundedHistoryQuery(input.sessionId, limit = 5))
+        assertEquals(1, result.records.size)
+        val sql = http.sent.single()["sql"]!!.jsonPrimitive.content
+        assertTrue(sql.contains("row_number() OVER (PARTITION BY event_id"))
+        assertTrue(sql.endsWith("LIMIT 5"))
+        assertFalse(sql.contains(input.profileId.value))
+        assertEquals(ErrorCode.BAD_RESPONSE, failure { client(http, gate).query(BoundedHistoryQuery(SessionId.new())) }.error.code)
+    }
+
+    @Test fun measurementHistoryRedactsSnippetUnlessSeparatelyRequested() = runTest {
+        val metrics = RecordingMetrics(20.0, 40, 120.0, .1, dataOrigin = DataOrigin.SYNTHETIC)
+        val input = event(projection = ExportProjection.Measurements(1, metrics, "Explicitly approved snippet", "sleep"))
+        val row = buildJsonObject { put("payload", RawTreeExportWire.encode(input)) }
+        val normal = RawTreeExportWire.decode(row, BoundedHistoryQuery(input.sessionId, field = ExportField.MEASUREMENTS))
+        assertNull((normal.projection as ExportedHistoryProjection.Measurements).value.transcriptSnippet)
+        val selected = RawTreeExportWire.decode(row, BoundedHistoryQuery(input.sessionId, field = ExportField.TRANSCRIPT_SNIPPET))
+        assertEquals("Explicitly approved snippet", (selected.projection as ExportedHistoryProjection.Measurements).value.transcriptSnippet)
+    }
+
+    @Test fun memorySqlCountsSeparatelyAndSelectsLatestBeforeEligibilityAndLimit() {
+        val query = MemoryQuery(ProfileId.new(), SessionId.new(), DataOrigin.SYNTHETIC, RecordingTask.CHECK_IN, "android-pcm-v1", "english-lexical-v1", MemoryQuery.WINDOW_DURATION_MS + 1000)
+        val sql = RawTreeExportWire.memorySql(query)
+        assertTrue(sql.counts.contains("uniqExact(session_ref) AS data_point_count"))
+        assertFalse(sql.counts.contains("uniqExact(export_id)"))
+        assertTrue(sql.counts.contains("uniqExact(session_ref)"))
+        assertFalse(sql.counts.contains("LIMIT"))
+        assertTrue(sql.previous.contains("ORDER BY summary_version DESC, input_revision DESC"))
+        assertTrue(sql.previous.contains(")\nWHERE latest_rank = 1 AND data_origin = 'synthetic'"))
+        assertTrue(sql.previous.contains("session_created_at_ms >= 1000"))
+        assertTrue(sql.previous.contains("completed_at_ms < ${query.beforeCreatedAtMs}"))
+        assertTrue(sql.previous.endsWith("LIMIT 8"))
+        assertTrue(sql.current.contains("session_ref = '${query.currentSessionId.value}'"))
+        assertTrue(sql.current.contains("completed_at_ms >= session_created_at_ms"))
+    }
+
+    @Test fun unavailableMemoryDoesNotInventZeroCounts() = runTest {
+        val query = MemoryQuery(ProfileId.new(), SessionId.new(), DataOrigin.SYNTHETIC, RecordingTask.CHECK_IN, "android-pcm-v1", "english-lexical-v1", 1000)
+        val http = Http()
+        val gate = Gate()
+        val result = client(http, gate).memory(query)
+        assertEquals(RawTreeMemoryStatus.UNAVAILABLE, result.status)
+        assertNull(result.dataPointCount)
+        assertNull(result.sessionCount)
+        assertEquals(ErrorCode.CONSENT_REQUIRED, result.diagnostics.error)
+        assertTrue(http.sent.isEmpty())
+    }
+
+    @Test fun memoryReturnsExactProviderCountsAndBoundedPreviousAndCurrent() = runTest {
+        val cutoff = MemoryQuery.WINDOW_DURATION_MS + 10_000L
+        val query = MemoryQuery(ProfileId.new(), SessionId.new(), DataOrigin.SYNTHETIC, RecordingTask.CHECK_IN, "android-pcm-v1", "english-lexical-v1", cutoff)
+        fun row(sessionId: SessionId, timestamp: Long, wpm: Double): JsonObject {
+            val metrics = RecordingMetrics(20.0, 40, wpm, .1, dataOrigin = DataOrigin.SYNTHETIC)
+            val input = event(projection = ExportProjection.Measurements(1, metrics, sessionCreatedAtMs = timestamp, completedAtMs = timestamp, task = query.task)).copy(profileId = query.profileId, sessionId = sessionId, createdAtMs = timestamp + 100)
+            return buildJsonObject { put("payload", RawTreeExportWire.encode(input)) }
+        }
+        val prior = (0 until 8).map { row(SessionId.new(), cutoff - (it + 1) * 1000, 100.0 + it) }
+        val current = row(query.currentSessionId, cutoff, 115.0)
+        val http = Http()
+        val responses = ArrayDeque(listOf(
+            buildJsonObject { put("data", JsonArray(listOf(buildJsonObject { put("data_point_count", "20"); put("session_count", "20") }))) },
+            buildJsonObject { put("data", JsonArray(prior)) },
+            buildJsonObject { put("data", JsonArray(listOf(current))) },
+        ))
+        http.beforeDispatch = { http.response = responses.removeFirst() }
+        val result = client(http, Gate().apply { allowed = true }).memory(query)
+        assertEquals(RawTreeMemoryStatus.AVAILABLE, result.status)
+        assertEquals(20L, result.dataPointCount)
+        assertEquals(20L, result.sessionCount)
+        assertEquals(8, result.previousSessions.size)
+        assertEquals(query.currentSessionId, result.currentSession!!.sessionId)
+        assertEquals(103.5, result.meanRecordingWpm!!, .000001)
+        assertEquals(9, result.diagnostics.returnedRows)
+        assertEquals(3, http.sent.size)
+        assertTrue(http.sent.none { it.toString().contains(query.profileId.value) })
+        assertTrue(result.diagnostics.latencyMs!! >= 0)
+    }
+
+    @Test fun memoryNeverSubstitutesExportTimeForMissingSessionChronology() = runTest {
+        val metrics = RecordingMetrics(20.0, 40, 120.0, .1, dataOrigin = DataOrigin.SYNTHETIC)
+        val input = event(projection = ExportProjection.Measurements(1, metrics)).copy(createdAtMs = 999)
+        val encoded = RawTreeExportWire.encode(input)
+        assertEquals(JsonNull, encoded["session_created_at_ms"])
+        assertEquals(JsonNull, encoded["completed_at_ms"])
+        val query = MemoryQuery(input.profileId, SessionId.new(), input.dataOrigin, RecordingTask.CHECK_IN, "android-pcm-v1", "english-lexical-v1", 1000)
+        val row = buildJsonObject { put("payload", encoded) }
+        val history = RawTreeExportWire.decode(row, BoundedHistoryQuery(input.sessionId, field = ExportField.MEASUREMENTS))
+        assertNull((history.projection as ExportedHistoryProjection.Measurements).value.sessionCreatedAtMs)
+        assertEquals(ErrorCode.BAD_RESPONSE, failure { RawTreeExportWire.decodeMemory(row, query) }.error.code)
     }
 
     private suspend fun failure(block: suspend () -> Unit): ClearLineException {

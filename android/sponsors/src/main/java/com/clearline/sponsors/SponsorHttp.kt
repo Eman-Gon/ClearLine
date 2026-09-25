@@ -6,7 +6,6 @@ import com.clearline.core.ErrorCode
 import com.clearline.core.Sponsor
 import java.io.IOException
 import java.net.SocketTimeoutException
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -25,8 +24,8 @@ internal fun sponsorFailure(code: ErrorCode, message: String, retryable: Boolean
     throw ClearLineException(AppError(code, message, retryable))
 
 internal interface CredentialProvider {
-    /** A fresh temporary copy is wiped after the request finishes or is cancelled. */
-    suspend fun <T> withCredential(service: Sponsor, block: suspend (ByteArray) -> T): T
+    /** The copy is wiped after use; requireCurrent rejects settings/key changes during authorization. */
+    suspend fun <T> withCredential(service: Sponsor, block: suspend (token: ByteArray, requireCurrent: () -> Unit) -> T): T
 }
 
 internal interface SponsorHttp {
@@ -60,8 +59,9 @@ internal class OkHttpSponsorTransport(
         }
         val encoded = body.toString().toByteArray(Charsets.UTF_8)
         if (encoded.size > MAX_REQUEST_BYTES) sponsorFailure(ErrorCode.INVALID_INPUT, "Sponsor request exceeds its size limit.")
-        return credentials.withCredential(service) { token ->
+        return credentials.withCredential(service) { token, requireCurrent ->
             authorize()
+            requireCurrent()
             // Authorization necessarily becomes a temporary JVM String for OkHttp.
             // It is never placed in errors, persisted state, URLs or logging.
             val tokenText = token.toString(Charsets.UTF_8)
@@ -88,9 +88,9 @@ internal class OkHttpSponsorTransport(
         val call = client.newCall(request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
-            override fun onFailure(call: Call, error: IOException) {
+            override fun onFailure(call: Call, e: IOException) {
                 if (!continuation.isActive) return
-                val code = if (error is SocketTimeoutException || error is java.io.InterruptedIOException) ErrorCode.TIMEOUT else ErrorCode.NETWORK_UNAVAILABLE
+                val code = if (e is SocketTimeoutException || e is java.io.InterruptedIOException) ErrorCode.TIMEOUT else ErrorCode.NETWORK_UNAVAILABLE
                 continuation.resumeWithException(ClearLineException(AppError(code, "Sponsor request could not complete.", true)))
             }
 

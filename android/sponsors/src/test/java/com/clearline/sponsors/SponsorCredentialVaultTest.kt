@@ -37,11 +37,11 @@ class SponsorCredentialVaultTest {
         val restored = SponsorCredentialVault(blobs, CredentialCipher(keys), config)
         assertTrue(restored.observeStatus().first().all { it.state == CredentialState.CONFIGURED })
         var reference: ByteArray? = null
-        restored.withCredential(Sponsor.NIMBLE) { bytes -> reference = bytes; assertEquals("synthetic-NIMBLE-key", String(bytes)) }
+        restored.withCredential(Sponsor.NIMBLE) { bytes, current -> current(); reference = bytes; assertEquals("synthetic-NIMBLE-key", String(bytes)) }
         assertTrue(reference!!.all { it == 0.toByte() })
         restored.clearCredential(Sponsor.NIMBLE)
         assertEquals(CredentialState.MISSING, restored.observeStatus().first().first { it.sponsor == Sponsor.NIMBLE }.state)
-        restored.withCredential(Sponsor.RAWTREE) { assertEquals("synthetic-RAWTREE-key", String(it)) }
+        restored.withCredential(Sponsor.RAWTREE) { bytes, current -> current(); assertEquals("synthetic-RAWTREE-key", String(bytes)) }
         assertFalse(blobs.data.containsKey("nimble")); assertFalse(keys.keys.containsKey("nimble"))
     }
 
@@ -60,12 +60,39 @@ class SponsorCredentialVaultTest {
     @Test fun disabledServiceCannotReadTokenAndCancellationWipesTemporaryCopy() = runTest {
         val vault = SponsorCredentialVault(MemoryBlobs(), CredentialCipher(MemoryKeys()), MemoryConfig())
         SecretValue("synthetic-secret".toCharArray()).use { vault.setCredential(Sponsor.NIMBLE, it) }
-        try { vault.withCredential(Sponsor.NIMBLE) { fail("Disabled service must not dispatch") }; fail("Expected denial") }
+        try { vault.withCredential(Sponsor.NIMBLE) { _, _ -> fail("Disabled service must not dispatch") }; fail("Expected denial") }
         catch (error: ClearLineException) { assertEquals(ErrorCode.CONSENT_REQUIRED, error.error.code) }
         vault.setConfiguration(SponsorConfiguration(nimbleEnabled = true))
         var reference: ByteArray? = null
-        try { vault.withCredential(Sponsor.NIMBLE) { reference = it; throw CancellationException("test") } }
+        try { vault.withCredential(Sponsor.NIMBLE) { bytes, _ -> reference = bytes; throw CancellationException("test") } }
         catch (_: CancellationException) { }
         assertTrue(reference!!.all { it == 0.toByte() })
+    }
+
+    @Test fun clearReplacementAndDisableInvalidatePendingCredentialCopies() = runTest {
+        val vault = SponsorCredentialVault(MemoryBlobs(), CredentialCipher(MemoryKeys()), MemoryConfig())
+        suspend fun configure() {
+            SecretValue("synthetic-secret".toCharArray()).use { vault.setCredential(Sponsor.NIMBLE, it) }
+            vault.setConfiguration(SponsorConfiguration(nimbleEnabled = true))
+        }
+        for (change in 0..2) {
+            configure()
+            var reference: ByteArray? = null
+            try {
+                vault.withCredential(Sponsor.NIMBLE) { bytes, current ->
+                    reference = bytes
+                    current()
+                    when (change) {
+                        0 -> vault.clearCredential(Sponsor.NIMBLE)
+                        1 -> SecretValue("replacement".toCharArray()).use { vault.setCredential(Sponsor.NIMBLE, it) }
+                        else -> vault.setConfiguration(SponsorConfiguration())
+                    }
+                    current()
+                    fail("Changed credential/settings must invalidate the pending copy")
+                }
+                fail("Expected a stale credential denial")
+            } catch (error: ClearLineException) { assertEquals(ErrorCode.STALE_REVISION, error.error.code) }
+            assertTrue(reference!!.all { it == 0.toByte() })
+        }
     }
 }
