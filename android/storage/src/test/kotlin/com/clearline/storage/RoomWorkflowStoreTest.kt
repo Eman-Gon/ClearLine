@@ -236,4 +236,27 @@ class RoomWorkflowStoreTest {
         assertEquals(2, baseline.previousSessions.first { it.sessionId == second.sessionId }.version)
         assertEquals(accepted.result!!.metrics.energyRms, store.getSession(second.sessionId)!!.clips.single().result!!.metrics.energyRms, 0.0)
     }
+    @Test fun activeClaimNeverReceivesAnUnfinishedPlanFromAnotherWorkflowScope() = runBlocking {
+        val s = completed()
+        val (_, comparisonPlan) = plan(s)
+        store.recoverInterrupted(now++)
+        val paused = store.getSession(s.sessionId)!!
+        val request = ApprovedResourceRequest(s.sessionId, 1, ApprovalId.new(), ResourceCategory.RESPITE_CARE, "Seattle", now++)
+        val researching = paused.copy(stateVersion = paused.stateVersion + 1, inputRevision = 1, researchRevision = 1, phase = Phase.RESEARCHING, approvedResources = request)
+        val researchJob = JobRecord(JobId.new(), s.sessionId, 1, JobKind.ADVANCE_WORKFLOW, createdAtMs = now++, updatedAtMs = now++, scope = WorkflowScope.RESEARCH, scopeRevision = 1, stepOrdinal = 1)
+        store.applyCommand(CommandMutation(paused.stateVersion, paused.inputRevision, researching, checkpoint(researching).copy(workflowScope = WorkflowScope.RESEARCH, scopeRevision = 1), enqueueJobs = listOf(researchJob)))
+        assertEquals(researchJob.jobId, store.claimJob(s.sessionId, now++)!!.job.jobId)
+        assertNull(store.getPendingPlan(s.sessionId))
+        assertEquals(ActionStatus.UNKNOWN, store.getSession(s.sessionId)!!.actions.first { it.actionId == comparisonPlan.actionId }.status)
+    }
+    @Test fun duplicateLogicalJobConstraintRollsBackEntireCommand() = runBlocking {
+        val s = completed()
+        val first = JobRecord(JobId.new(), s.sessionId, 0, JobKind.ADVANCE_WORKFLOW, createdAtMs = now++, updatedAtMs = now++, stepOrdinal = 1)
+        val duplicate = first.copy(jobId = JobId.new())
+        var failure: Exception? = null
+        try { change(s, jobs = listOf(first, duplicate)) } catch (error: Exception) { failure = error }
+        assertNotNull(failure)
+        assertEquals(s.stateVersion, store.getSession(s.sessionId)!!.stateVersion)
+        assertNull(store.claimJob(s.sessionId, now++))
+    }
 }

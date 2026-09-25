@@ -66,6 +66,35 @@ class CoordinatorTest {
         assertNull(result.energyRms)
     }
 
+    @Test fun researchApprovedDuringComparisonFinishCompletesBothScopes() = runTest {
+        val h = Harness(this)
+        val id = h.store.seedComparison()
+        val finishingComparison = CompletableDeferred<Unit>()
+        val allowFinish = CompletableDeferred<Unit>()
+        h.agent.beforeProposal = { checkpoint ->
+            if (checkpoint.workflowScope == WorkflowScope.COMPARISON && checkpoint.comparison != null) {
+                finishingComparison.complete(Unit)
+                allowFinish.await()
+            }
+        }
+        h.coordinator.onForeground()
+        h.coordinator.resume(id)
+        finishingComparison.await()
+        assertNotNull(h.store.getSession(id)!!.comparison)
+        h.coordinator.requestResources(request(id, revision = h.store.getSession(id)!!.inputRevision))
+        assertTrue(h.store.jobs.values.any { it.scope == WorkflowScope.RESEARCH && it.status == JobStatus.PENDING })
+        allowFinish.complete(Unit)
+        h.coordinator.awaitIdle()
+        val state = h.store.getSession(id)!!
+        assertEquals(Phase.READY, state.phase)
+        val finished = state.actions.filter { it.proposal == ProposedAction.FinishTask && it.status == ActionStatus.SUCCEEDED }
+        assertEquals(setOf(WorkflowScope.COMPARISON, WorkflowScope.RESEARCH), finished.map { it.scope }.toSet())
+        assertEquals(2, finished.size)
+        assertEquals(1, h.resources.searchCalls.size)
+        assertEquals(1, h.resources.extractCalls.size)
+        assertTrue(h.store.jobs.values.filter { it.sessionId == id }.all { it.status == JobStatus.COMPLETED })
+    }
+
     @Test fun deniedRecordingCreatesNothingAndFinalizedClipAdmissionIsIdempotent() = runTest {
         val h = Harness(this)
         expectError(ErrorCode.INVALID_INPUT) { h.coordinator.createSession(CreateSession(h.store.profile.profileId, false)) }
@@ -117,6 +146,46 @@ class CoordinatorTest {
         assertFalse(state.pauseRequested)
         assertTrue(state.resources.isEmpty())
         assertTrue(state.actions.none { it.status == ActionStatus.SUCCEEDED })
+    }
+
+    @Test fun replacementBeforeFirstSummaryRejectsOldAsrResultWithoutFailingNewClip() = runTest {
+        val h = Harness(this)
+        val id = h.coordinator.createSession(CreateSession(h.store.profile.profileId, true))
+        val original = testClip(id)
+        val replacement = testClip(id, marker = 1).copy(supersedesClipId = original.clipId)
+        val entered = CompletableDeferred<Unit>()
+        val staleResult = CompletableDeferred<Unit>()
+        h.audioBehavior = { clip ->
+            if (clip.clipId == original.clipId) {
+                entered.complete(Unit)
+                withContext(NonCancellable) { staleResult.await() }
+            }
+            testAudio(clip)
+        }
+        try {
+            h.coordinator.acceptClip(original)
+            h.coordinator.finishCapture(id)
+            h.coordinator.onForeground()
+            h.coordinator.resume(id)
+            entered.await()
+            h.coordinator.acceptClip(replacement)
+            assertEquals(0L, h.store.getSession(id)!!.comparisonRevision)
+            staleResult.complete(Unit)
+            h.coordinator.awaitIdle()
+            val state = h.store.getSession(id)!!
+            assertEquals(Phase.AWAITING_USER_CHOICE, state.phase)
+            assertEquals(2, h.audioCalls)
+            val superseded = state.clips.single { it.clip.clipId == original.clipId }
+            assertNull(superseded.result)
+            assertEquals(replacement.clipId, superseded.supersededBy)
+            assertNotNull(state.clips.single { it.clip.clipId == replacement.clipId }.result)
+            assertEquals(listOf(replacement.clipId), h.store.summaries.single { it.sessionId == id }.clipIds)
+            assertTrue(state.errors.isEmpty())
+            assertEquals(JobStatus.INVALIDATED, h.store.jobs.values.single { it.clipId == original.clipId }.status)
+        } finally {
+            File(original.privatePath).delete()
+            File(replacement.privatePath).delete()
+        }
     }
 
     @Test fun committedSearchSurvivesReconstructionAndUnknownExtractReusesIdentity() = runTest {
@@ -191,9 +260,8 @@ class CoordinatorTest {
         h.coordinator.requestResources(request(id, revision = 1, city = "New City"))
         response.complete(Unit)
         h.coordinator.awaitIdle()
-        h.coordinator.resume(id)
-        h.coordinator.awaitIdle()
         val state = h.store.getSession(id)!!
+        assertEquals(Phase.READY, state.phase) // edited revision progresses without another Resume
         assertEquals("New City", state.approvedResources!!.city)
         assertTrue(state.resources.all { it.title == "New City service" })
         assertEquals(ActionStatus.INVALIDATED, state.actions.single { it.actionId == oldActionId }.status)
@@ -294,6 +362,33 @@ class CoordinatorTest {
         assertTrue(h.history.appendCalls.isEmpty())
     }
 
+    @Test fun eventsOnlyApprovalExportsNewActionEventsOnce() = runTest {
+        val h = Harness(this)
+        val id = h.store.seedComparison()
+        h.store.seedHistory()
+        h.coordinator.setExportConsent(ExportConsentChange(id, 0, setOf(ExportField.EVENTS)))
+        assertTrue(h.store.exports.isEmpty()) // no preexisting summary/event backfill at approval
+        assertTrue(h.history.appendCalls.isEmpty())
+        h.coordinator.onForeground()
+        h.coordinator.resume(id)
+        h.coordinator.awaitIdle()
+        val delivered = h.history.appendCalls.toList()
+        assertEquals(Phase.AWAITING_USER_CHOICE, h.store.getSession(id)!!.phase)
+        assertEquals(3, delivered.size)
+        assertTrue(delivered.all { it.sessionId == id && it.projection is ExportProjection.Event })
+        val events = delivered.map { it.projection as ExportProjection.Event }
+        assertEquals(listOf(ExportEventName.ACTION_COMPLETED, ExportEventName.ACTION_COMPLETED,
+            ExportEventName.WORKFLOW_COMPLETED), events.map { it.name })
+        assertTrue(events.all { it.status == ExportEventStatus.COMPLETED })
+        assertEquals(3, delivered.map { it.exportId }.distinct().size)
+        assertEquals(3, events.map { it.eventId }.distinct().size)
+        assertTrue(h.store.exports.isEmpty())
+
+        repeat(5) { h.coordinator.resume(id) }
+        h.coordinator.awaitIdle()
+        assertEquals(delivered, h.history.appendCalls) // no duplicate delivery or regenerated event/export IDs
+    }
+
     @Test fun revokedExportCannotBeEnqueuedByAlreadyRunningExtraction() = runTest {
         val h = Harness(this)
         val id = h.store.seedComparison(Phase.AWAITING_USER_CHOICE)
@@ -352,8 +447,14 @@ class CoordinatorTest {
         h.store.seedHistory()
         val chosenSnippet = "This exact edited snippet was reviewed."
         val chosenKeyword = "chosen topic"
+        expectError(ErrorCode.INVALID_INPUT) {
+            h.coordinator.setExportConsent(ExportConsentChange(id, 0,
+                setOf(ExportField.MEASUREMENTS, ExportField.TRANSCRIPT_SNIPPET), chosenSnippet, chosenKeyword))
+        }
+        assertTrue(h.store.exports.isEmpty())
         h.coordinator.setExportConsent(ExportConsentChange(id, 0,
-            setOf(ExportField.MEASUREMENTS, ExportField.TRANSCRIPT_SNIPPET), chosenSnippet, chosenKeyword))
+            setOf(ExportField.MEASUREMENTS, ExportField.TRANSCRIPT_SNIPPET), chosenSnippet, chosenKeyword,
+            expectedInputRevision = 0))
         val export = h.store.exports.single()
         val projection = export.projection as ExportProjection.Measurements
         assertEquals(id, export.sessionId)
@@ -364,6 +465,34 @@ class CoordinatorTest {
         assertNotEquals(export.createdAtMs, projection.completedAtMs)
         assertEquals(1, projection.summaryVersion)
         assertTrue(h.history.appendCalls.isEmpty()) // approval itself does not bypass foreground scheduling
+    }
+
+    @Test fun correctionInvalidatesFirstTextPreviewEvenBeforeAnyExportConsent() = runTest {
+        val h = Harness(this)
+        val id = h.store.seedComparison(Phase.AWAITING_USER_CHOICE)
+        val previewState = h.store.getSession(id)!!
+        val firstPreview = ExportConsentChange(id, expectedConsentRevision = 0,
+            selectedFields = setOf(ExportField.MEASUREMENTS, ExportField.TRANSCRIPT_SNIPPET),
+            reviewedTranscriptSnippet = "Previously reviewed snippet", reviewedKeyword = "previous topic",
+            expectedInputRevision = previewState.inputRevision)
+        h.coordinator.applyInput(RevisionedUserInput(id, previewState.inputRevision,
+            UserInput.TranscriptCorrection(previewState.clips.single().clip.clipId, "New corrected transcript words")))
+        val corrected = h.store.getSession(id)!!
+        assertEquals(1L, corrected.inputRevision)
+        assertEquals(0L, corrected.consent.exportRevision)
+        expectError(ErrorCode.STALE_REVISION) { h.coordinator.setExportConsent(firstPreview) }
+        assertTrue(h.store.exports.isEmpty())
+        assertTrue(h.store.getSession(id)!!.consent.exportFields.isEmpty())
+        assertEquals(0L, h.store.getSession(id)!!.consent.exportRevision)
+        assertTrue(h.history.appendCalls.isEmpty())
+
+        // A fresh review can approve only the corrected current summary.
+        h.coordinator.setExportConsent(firstPreview.copy(expectedInputRevision = corrected.inputRevision,
+            reviewedTranscriptSnippet = "New corrected transcript words", reviewedKeyword = "corrected topic"))
+        val projection = h.store.exports.single().projection as ExportProjection.Measurements
+        assertEquals(2, projection.summaryVersion)
+        assertEquals("New corrected transcript words", projection.transcriptSnippet)
+        assertEquals(corrected.metrics, projection.metrics)
     }
 
     @Test fun optionalMemoryResponseCannotRestoreCacheAfterConsentChanges() = runTest {
@@ -410,6 +539,51 @@ class CoordinatorTest {
         assertNull(h.store.getSession(id)!!.rawTreeMemory)
     }
 
+    @Test fun backgroundingDrainsQueuedMemoryWithoutDispatchingIt() = runTest {
+        val h = Harness(this)
+        val id = h.store.seedComparison(Phase.AWAITING_USER_CHOICE)
+        val toolEntered = CompletableDeferred<Unit>()
+        val safeBoundary = CompletableDeferred<Unit>()
+        h.resources.searchBehavior = {
+            toolEntered.complete(Unit)
+            try { awaitCancellation() } finally { withContext(NonCancellable) { safeBoundary.await() } }
+        }
+        h.coordinator.onForeground()
+        h.coordinator.requestResources(request(id))
+        toolEntered.await()
+        val refresh = async { h.coordinator.refreshExportedMemory(id) }
+        runCurrent()
+        assertTrue(h.history.memoryCalls.isEmpty())
+        val background = async { h.coordinator.onBackground() }
+        runCurrent()
+        assertFalse(background.isCompleted)
+        safeBoundary.complete(Unit)
+        background.await()
+        refresh.join()
+        // A queued refresh may finish as a foreground-guarded no-op before the
+        // cancellation reaches it. The contract is drained work and no dispatch.
+        assertTrue(refresh.isCompleted)
+        assertTrue(h.history.memoryCalls.isEmpty())
+        assertNull(h.store.getSession(id)!!.rawTreeMemory)
+    }
+
+    @Test fun remoteMemoryTextIsRemovedWithoutCurrentTextGrant() = runTest {
+        val h = Harness(this)
+        val id = h.store.seedComparison(Phase.AWAITING_USER_CHOICE)
+        h.history.memoryBehavior = { query ->
+            val rows = (1L..2L).map { time -> MemorySession(SessionId.new(), query.profileId, time, 1, 0,
+                query.dataOrigin, query.task, metrics(), transcriptSnippet = "Previously exported private excerpt", topKeyword = "topic") }
+            RawTreeMemoryMath.snapshot(query, rows, 2, 2, 120, RawTreeMemoryDiagnostics())
+        }
+        h.coordinator.onForeground()
+        h.coordinator.refreshExportedMemory(id)
+        val memory = h.store.getSession(id)!!.rawTreeMemory!!
+        assertEquals(2, memory.previousSessions.size)
+        assertTrue(memory.previousSessions.all { it.transcriptSnippet == null && it.topKeyword == null })
+        assertEquals(BaselineStatus.INSUFFICIENT_HISTORY, h.store.readBaseline(BaselineQuery(h.store.profile.profileId,
+            id, RecordingTask.CHECK_IN, DataOrigin.CONSENTED_DEMO, "android-pcm-v1", "english-lexical-v1", 100)).status)
+    }
+
     private suspend fun expectError(code: ErrorCode, action: suspend () -> Unit) {
         try { action(); fail("Expected $code") } catch (error: ClearLineException) { assertEquals(code, error.error.code) }
     }
@@ -424,11 +598,12 @@ class CoordinatorTest {
         val resources = TestResources()
         val history = TestHistory()
         var audioCalls = 0
+        var audioBehavior: (suspend (CompletedLocalClip) -> AudioResult)? = null
         var cancelInferenceCalls = 0
         private val audio = object : LocalAudioProcessor {
             override suspend fun process(clip: CompletedLocalClip): AudioResult {
                 audioCalls++
-                return testAudio(clip)
+                return audioBehavior?.invoke(clip) ?: testAudio(clip)
             }
         }
         val coordinator = newCoordinator()
@@ -439,8 +614,10 @@ class CoordinatorTest {
     private class TestAgent : ToolCallingLocalAgent {
         val calls = mutableListOf<AgentCheckpoint>()
         var proposalOverride: (suspend (AgentCheckpoint) -> ProposedAction)? = null
+        var beforeProposal: (suspend (AgentCheckpoint) -> Unit)? = null
         override suspend fun proposeTurn(checkpoint: AgentCheckpoint): ModelProposal {
             calls += checkpoint
+            beforeProposal?.invoke(checkpoint)
             val action = proposalOverride?.invoke(checkpoint) ?: if (checkpoint.workflowScope == WorkflowScope.RESEARCH) when {
                 checkpoint.candidateSources.isEmpty() -> ProposedAction.SearchPublicResources
                 checkpoint.sourceIds.isEmpty() -> ProposedAction.ExtractPublicPage(checkpoint.candidateSources.first().candidateId)
@@ -493,13 +670,14 @@ class CoordinatorTest {
         private fun metrics() = RecordingMetrics(20.0, 40, 120.0, .1, dataOrigin = DataOrigin.CONSENTED_DEMO)
         private fun testAudio(clip: CompletedLocalClip) = AudioResult(clip.clipId, "test-only transcript",
             metrics().copy(durationSeconds = clip.durationSeconds, recordingWpm = 40 * 60 / clip.durationSeconds), ModelId("test-asr"), 100)
-        private fun testClip(id: SessionId): CompletedLocalClip {
+        private fun testClip(id: SessionId, marker: Byte = 0): CompletedLocalClip {
             val file = File.createTempFile("clearline-coordinator-test-", ".wav")
             val bytes = ByteArray(64044)
             val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
             header.put("RIFF".toByteArray()).putInt(bytes.size - 8).put("WAVEfmt ".toByteArray()).putInt(16)
                 .putShort(1).putShort(1).putInt(16000).putInt(32000).putShort(2).putShort(16)
                 .put("data".toByteArray()).putInt(bytes.size - 44)
+            bytes[44] = marker
             file.writeBytes(bytes)
             val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
             return CompletedLocalClip(id, ClipId.new(), file.absolutePath, digest, 2.0, DataOrigin.CONSENTED_DEMO, createdAtMs = 1)
@@ -578,7 +756,11 @@ class CoordinatorTest {
             }
             old.clips.find { it.clip.sha256 == clip.sha256 }?.let { return it.receipt.copy(duplicate = true) }
             val receipt = ClipReceipt(clip.sessionId, clip.clipId, clip.sha256, acceptedAtMs)
-            sessions[old.sessionId] = old.copy(clips = old.clips + StoredClip(clip, receipt), stateVersion = old.stateVersion + 1)
+            val acceptedClips = old.clips.map { if (it.clip.clipId == clip.supersedesClipId) it.copy(supersededBy = clip.clipId) else it }
+            sessions[old.sessionId] = old.copy(clips = acceptedClips + StoredClip(clip, receipt), stateVersion = old.stateVersion + 1)
+            if (clip.supersedesClipId != null) jobs.replaceAll { _, job ->
+                if (job.sessionId == clip.sessionId && job.clipId == clip.supersedesClipId) job.copy(status = JobStatus.INVALIDATED, claimToken = null) else job
+            }
             checkpoints[old.sessionId] = checkpoints.getValue(old.sessionId).copy(stateVersion = old.stateVersion + 1)
             val job = JobRecord(JobId.new(), old.sessionId, old.inputRevision, JobKind.PROCESS_AUDIO, clipId = clip.clipId,
                 createdAtMs = acceptedAtMs, updatedAtMs = acceptedAtMs, scopeRevision = old.comparisonRevision)
@@ -587,7 +769,7 @@ class CoordinatorTest {
         }
         override suspend fun claimJob(sessionId: SessionId, nowMs: Long): JobClaim? {
             val state = snapshot(sessionId)
-            if (state.phase in setOf(Phase.PAUSED, Phase.READY, Phase.AWAITING_INPUT, Phase.AWAITING_USER_CHOICE, Phase.AGENT_UNAVAILABLE) || state.pauseRequested) return null
+            if (state.phase !in setOf(Phase.PROCESSING, Phase.COMPARING, Phase.RESEARCHING) || state.pauseRequested) return null
             if (jobs.values.any { it.status == JobStatus.CLAIMED }) return null
             val job = jobs.values.firstOrNull { it.sessionId == sessionId && it.status == JobStatus.PENDING && it.scopeRevision == state.revision(it.scope) } ?: return null
             val token = UUID.randomUUID().toString()
@@ -601,7 +783,16 @@ class CoordinatorTest {
             val current = jobs[claim.job.jobId] ?: fail(ErrorCode.NOT_FOUND)
             if (current.status != JobStatus.CLAIMED || current.claimToken != claim.claimToken || current.scopeRevision != state.revision(current.scope)) fail(ErrorCode.STALE_REVISION)
         }
-        override suspend fun getPendingPlan(sessionId: SessionId) = snapshot(sessionId).pendingAction
+        override suspend fun getPendingPlan(sessionId: SessionId): ActionRecord? {
+            val state = snapshot(sessionId)
+            val plans = state.actions.filter { it.status in setOf(ActionStatus.PLANNED, ActionStatus.RUNNING, ActionStatus.UNKNOWN) && it.scopeRevision == state.revision(it.scope) }
+            val claimed = jobs.values.firstOrNull { it.sessionId == sessionId && it.status == JobStatus.CLAIMED }
+            if (claimed != null) return plans.singleOrNull { it.jobId == claimed.jobId }
+            val checkpoint = checkpoints[sessionId]
+            return plans.firstOrNull { it.actionId == checkpoint?.pendingActionId }
+                ?: plans.lastOrNull { it.scope == checkpoint?.workflowScope }
+                ?: plans.lastOrNull()
+        }
         override suspend fun persistPlan(claim: JobClaim, action: ActionRecord): ActionRecord {
             checkClaim(claim)
             val prior = actions[action.actionId]
@@ -698,11 +889,13 @@ class CoordinatorTest {
             val state = SessionSnapshot(sessionId = id, profileId = profile.profileId, phase = phase,
                 executionMode = ExecutionMode.REAL_ON_DEVICE, dataOrigin = DataOrigin.CONSENTED_DEMO, createdAtMs = 100, updatedAtMs = 100,
                 consent = ConsentState(recording = true), metrics = metrics(), captureFinished = true, summaryVersion = 1,
+                comparison = if (phase == Phase.AWAITING_USER_CHOICE)
+                    DescriptiveComparison(BaselineSummary(BaselineStatus.INSUFFICIENT_HISTORY, emptyList(), null, null), null, null) else null,
                 clips = listOf(StoredClip(clip, ClipReceipt(id, clip.clipId, clip.sha256, 1), testAudio(clip), audioDeleted = true)))
             sessions[id] = state
             summaries += SessionSummary(id, profile.profileId, 1, 0, state.task, state.dataOrigin, state.metrics!!, 110, listOf(clip.clipId))
             checkpoints[id] = AgentCheckpoint(sessionId = id, profileId = profile.profileId, inputRevision = 0, stateVersion = 0,
-                phase = phase, task = state.task, dataOrigin = state.dataOrigin, metrics = state.metrics)
+                phase = phase, task = state.task, dataOrigin = state.dataOrigin, metrics = state.metrics, comparison = state.comparison)
             if (phase == Phase.COMPARING) {
                 val job = JobRecord(JobId.new(), id, 0, JobKind.ADVANCE_WORKFLOW, createdAtMs = 1, updatedAtMs = 1, stepOrdinal = 1)
                 jobs[job.jobId] = job

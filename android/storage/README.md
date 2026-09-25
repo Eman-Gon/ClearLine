@@ -49,3 +49,11 @@ energy by duration. Zero variance produces no standardized difference.
 Run `gradle :storage:testDebugUnitTest :core:test --configure-on-demand` with the pinned
 Android SDK/build tools installed. Tests use Robolectric and synthetic local fixtures;
 they do not establish S24 audio, native inference or actual process-death behavior.
+
+Without SDK setup, `gradle -p tools/host-storage test --console=plain` from `android/`
+runs the checked-in host harness against the real Room runtime and KSP compiler.
+On September 25, 2026, this passed 16 storage tests and 24 core tests. The storage
+tests cover success-bundle rollback, logical-job uniqueness rollback, admission
+deduplication, file retention/cleanup, rejected-clip replacement, revision rejection,
+same-plan recovery, cross-scope plan selection, consent/revocation, separate reviewed
+text approval, latest-five baseline/correction behavior and the v1→v2 migration.

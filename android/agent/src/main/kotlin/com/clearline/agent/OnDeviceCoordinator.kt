@@ -27,6 +27,7 @@ class OnDeviceCoordinator(
     private val commands = Mutex()
     private val execution = Mutex()
     private val active = ConcurrentHashMap<SessionId, Job>()
+    private val rerunRequested = ConcurrentHashMap.newKeySet<SessionId>()
     private val memoryWork = ConcurrentHashMap<SessionId, Deferred<Unit>>()
     @Volatile private var foreground = false
     @Volatile private var executingSession: SessionId? = null
@@ -136,7 +137,7 @@ class OnDeviceCoordinator(
                     val clip = old.clips.find { it.clip.clipId == change.clipId && it.result != null && it.supersededBy == null }
                         ?: fail(ErrorCode.INVALID_INPUT, "Choose a completed recording to correct.")
                     val revision = old.inputRevision + 1
-                    val corrected = clip.copy(result = LocalMeasurements.correct(clip.result!!, change.transcript, now()))
+                    val corrected = clip.copy(result = LocalMeasurements.correct(clip.result!!, change.transcript))
                     var next = changed(old).copy(inputRevision = revision, comparisonRevision = old.comparisonRevision + 1,
                         clips = old.clips.map { if (it.clip.clipId == change.clipId) corrected else it }, comparison = null,
                         summaryVersion = old.summaryVersion + 1, pendingInput = null, pendingAction = null, errors = emptyList(),
@@ -150,6 +151,7 @@ class OnDeviceCoordinator(
                 }
                 is UserInput.Answer -> {
                     requireInput(old.pendingInput != null, "No question is currently awaiting an answer.")
+                    requireInput(old.pendingInput?.reason != "action_budget", "Correct the transcript or approve a new resource request to reset the exhausted workflow.")
                     val prior = store.getCheckpoint(old.sessionId)
                     val workflowScope = prior?.workflowScope ?: WorkflowScope.COMPARISON
                     requireInput(old.activeActions(workflowScope).size < 12, "The action budget is exhausted. Correct the transcript or approve a new resource request.")
@@ -201,6 +203,8 @@ class OnDeviceCoordinator(
         val old = session(input.sessionId)
         requireInput(old.consent.exportRevision == input.expectedConsentRevision, "Export approval changed; review it again.")
         val textSelected = ExportField.TRANSCRIPT_SNIPPET in input.selectedFields
+        input.expectedInputRevision?.let { requireRevision(old, it) }
+        requireInput(!textSelected || input.expectedInputRevision != null, "Review the current transcript revision before approving text export.")
         requireInput(!textSelected || ExportField.MEASUREMENTS in input.selectedFields, "Select measurements with the reviewed text export.")
         requireInput(textSelected || (input.reviewedTranscriptSnippet == null && input.reviewedKeyword == null), "Select text export before approving snippet or keyword fields.")
         requireInput(listOfNotNull(input.reviewedTranscriptSnippet, input.reviewedKeyword).all { it.isNotBlank() && it.none(Char::isISOControl) }, "Review a nonempty snippet and keyword without control characters, or omit them.")
@@ -279,11 +283,22 @@ class OnDeviceCoordinator(
     private fun launchSession(id: SessionId) {
         if (!foreground) return
         synchronized(active) {
+            rerunRequested.add(id)
             if (active[id]?.isCompleted == false) return
             lateinit var job: Job
             job = scope.launch(start = CoroutineStart.LAZY) {
-                try { execution.withLock { executingSession = id; runSession(id) } }
-                finally { if (executingSession == id) executingSession = null; withContext(NonCancellable) { settlePause(id) }; active.remove(id, job) }
+                try { execution.withLock { executingSession = id; rerunRequested.remove(id); runSession(id) } }
+                finally {
+                    val completedNormally = currentCoroutineContext().isActive
+                    if (executingSession == id) executingSession = null
+                    withContext(NonCancellable) { settlePause(id) }
+                    synchronized(active) {
+                        active.remove(id, job)
+                        // An input or export approval arriving during the final commit/flush
+                        // cannot be lost merely because the previous runner was still present.
+                        if (rerunRequested.remove(id) && completedNormally && foreground) launchSession(id)
+                    }
+                }
             }
             active[id] = job
             job.start()
@@ -291,7 +306,7 @@ class OnDeviceCoordinator(
     }
 
     /** Useful to application tests; ordinary UI reads must never call this. */
-    suspend fun awaitIdle() { active.values.toList().joinAll() }
+    suspend fun awaitIdle() { while (active.isNotEmpty()) active.values.toList().joinAll() }
 
     private suspend fun runSession(id: SessionId) {
         while (foreground && currentCoroutineContext().isActive) {
@@ -405,7 +420,7 @@ class OnDeviceCoordinator(
                     next = next.copy(sources = (old.sources.filterNot { it.sourceUrl == result.value.sourceUrl } + result.value).takeLast(36))
                 }
                 is ActionResult.InputRequested -> next = next.copy(phase = Phase.AWAITING_INPUT, pendingInput = result.value)
-                ActionResult.Finished -> next = next.copy(phase = if (action.scope == WorkflowScope.RESEARCH) Phase.READY else Phase.AWAITING_USER_CHOICE)
+                ActionResult.Finished -> next = next.copy(phase = completionPhase(old, action.scope))
             }
             val toolMessage = resultMessage(result, action.toolCallId)
             val finished = action.copy(status = ActionStatus.SUCCEEDED, result = result, toolMessage = toolMessage, completedAtMs = now())
@@ -436,7 +451,7 @@ class OnDeviceCoordinator(
 
     private suspend fun recordFailure(claim: JobClaim, error: AppError, blockedPhase: Phase) = commands.withLock {
         val old = store.getSession(claim.job.sessionId) ?: return@withLock
-        if (old.revision(claim.job.scope) != claim.job.scopeRevision) return@withLock // obsolete results never restore state
+        if (!claimMatches(claim, old)) return@withLock // obsolete/superseded results never restore state
         val plan = store.getPendingPlan(old.sessionId)?.takeIf { it.jobId == claim.job.jobId }
         val retrySameAction = plan == null || error.code in setOf(ErrorCode.CANCELLED, ErrorCode.TIMEOUT)
         val toolMessage = plan?.takeIf { !retrySameAction }?.let { ChatMessage(ChatRole.TOOL, safeJson(Json.encodeToString(error)), it.toolCallId) }
@@ -451,6 +466,7 @@ class OnDeviceCoordinator(
         if (plan == null && claim.job.attempt >= 3 && error.code !in setOf(ErrorCode.CANCELLED, ErrorCode.MISSING_MODEL, ErrorCode.MODEL_FAILED)) {
             next = budgetExhausted(next)
         }
+        if (retrySameAction && error.code == ErrorCode.TIMEOUT && claim.job.attempt >= 3) next = budgetExhausted(next)
         val base = checkpoint(next, claim.job.scope, store.getCheckpoint(old.sessionId))
         val exchanges = if (plan != null && toolMessage != null) listOf(plan.assistantMessage, toolMessage) else base.exchanges
         val jobs = if (!retrySameAction && next.activeActions(claim.job.scope).size < 12) listOf(workflowJob(next, claim.job.scope)) else emptyList()
@@ -524,7 +540,21 @@ class OnDeviceCoordinator(
         jobs: List<JobRecord> = emptyList(), invalidate: Set<WorkflowScope> = emptySet(), summary: SessionSummary? = null,
         checkpointOverride: AgentCheckpoint? = null, extraProjections: List<ExportProjection> = emptyList(), resume: Boolean = false): CommandMutation {
         val projections = mutableListOf<ExportProjection>()
-        projections += ExportProjection.WorkflowCounts(next.phase, next.actions.count { it.status == ActionStatus.SUCCEEDED }, jobs.size)
+        projections += ExportProjection.WorkflowCounts(next.phase, next.actions.count { it.status == ActionStatus.SUCCEEDED },
+            next.actions.count { it.status in setOf(ActionStatus.PLANNED, ActionStatus.RUNNING, ActionStatus.UNKNOWN) })
+        val completedBefore = old.actions.filter { it.status == ActionStatus.SUCCEEDED }.map { it.actionId }.toSet()
+        val completedNow = next.actions.filter { it.status == ActionStatus.SUCCEEDED && it.actionId !in completedBefore }
+        val event = when {
+            completedNow.any { it.result == ActionResult.Finished } -> ExportEventName.WORKFLOW_COMPLETED
+            completedNow.isNotEmpty() -> ExportEventName.ACTION_COMPLETED
+            next.clips.any { clip -> clip.result != null && old.clips.any { it.clip.clipId == clip.clip.clipId && it.result == null } } -> ExportEventName.AUDIO_PROCESSED
+            next.phase == Phase.PAUSED && old.phase != Phase.PAUSED -> ExportEventName.WORKFLOW_PAUSED
+            old.phase == Phase.PAUSED && next.phase != Phase.PAUSED -> ExportEventName.WORKFLOW_RESUMED
+            else -> null
+        }
+        if (event != null) projections += ExportProjection.Event(
+            "${next.sessionId.value}:${next.stateVersion}:${event.name.lowercase()}", event,
+            if (event == ExportEventName.WORKFLOW_PAUSED) ExportEventStatus.PAUSED else ExportEventStatus.COMPLETED, next.updatedAtMs)
         if (summary != null) projections += measurementProjection(next, summary)
         projections += extraProjections
         val exports = projections.map { projection -> ApprovedExport(ExportId.new(), next.profileId, next.sessionId,
@@ -559,7 +589,23 @@ class OnDeviceCoordinator(
         pendingInput = PendingInput("action_budget", "Correct the transcript or approve a new resource request to begin a new workflow revision."),
         errors = listOf(AppError(ErrorCode.RETRY_EXHAUSTED, "The bounded local workflow could not complete.")))
 
-    private suspend fun claimIsCurrent(claim: JobClaim) = store.getSession(claim.job.sessionId)?.revision(claim.job.scope) == claim.job.scopeRevision
+    private fun completionPhase(state: SessionSnapshot, completedScope: WorkflowScope): Phase {
+        fun finished(scope: WorkflowScope) = state.activeActions(scope).any {
+            it.status == ActionStatus.SUCCEEDED && it.result == ActionResult.Finished
+        }
+        return if (completedScope == WorkflowScope.COMPARISON) when {
+            state.approvedResources == null -> Phase.AWAITING_USER_CHOICE
+            finished(WorkflowScope.RESEARCH) -> Phase.READY
+            else -> Phase.RESEARCHING // Keep already-approved research jobs runnable.
+        } else if (state.comparison == null ||
+            (state.activeActions(WorkflowScope.COMPARISON).isNotEmpty() && !finished(WorkflowScope.COMPARISON))) Phase.COMPARING
+        else Phase.READY
+    }
+
+    private fun claimMatches(claim: JobClaim, state: SessionSnapshot) = state.revision(claim.job.scope) == claim.job.scopeRevision &&
+        (claim.job.kind != JobKind.PROCESS_AUDIO || state.clips.any { it.clip.clipId == claim.job.clipId && it.supersededBy == null && it.result == null })
+
+    private suspend fun claimIsCurrent(claim: JobClaim) = store.getSession(claim.job.sessionId)?.let { claimMatches(claim, it) } == true
 
     private fun summary(state: SessionSnapshot) = SessionSummary(state.sessionId, state.profileId, state.summaryVersion,
         state.inputRevision, state.task, state.dataOrigin, state.metrics ?: fail(ErrorCode.INVALID_INPUT, "No accepted metrics are available."),
@@ -569,7 +615,7 @@ class OnDeviceCoordinator(
     private suspend fun session(id: SessionId) = store.getSession(id) ?: fail(ErrorCode.NOT_FOUND, "This local session no longer exists.")
     private fun requireRevision(state: SessionSnapshot, revision: Long) { if (state.inputRevision != revision) fail(ErrorCode.STALE_REVISION, "This input changed. Review the current check-in.") }
     private fun ensureCurrent(claim: JobClaim, state: SessionSnapshot) {
-        if (state.revision(claim.job.scope) != claim.job.scopeRevision) fail(ErrorCode.STALE_REVISION, "This workflow changed before the result could be accepted.")
+        if (!claimMatches(claim, state)) fail(ErrorCode.STALE_REVISION, "This workflow or recording changed before the result could be accepted.")
         if (state.pauseRequested || state.phase == Phase.PAUSED || !foreground) throw CancellationException("Foreground work paused")
     }
     private fun requireInput(condition: Boolean, message: String) { if (!condition) fail(ErrorCode.INVALID_INPUT, message) }

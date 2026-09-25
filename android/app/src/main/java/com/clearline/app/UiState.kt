@@ -16,6 +16,7 @@ data class AppUiState(
     val credentials: List<CredentialStatus> = emptyList(),
     val sponsorConfiguration: SponsorConfiguration = SponsorConfiguration(),
     val capture: CaptureUi = CaptureUi(),
+    val pendingCaptureAdmission: Boolean = false,
     val busy: Boolean = false,
     val error: String? = null,
     val message: String? = null,
@@ -35,7 +36,7 @@ sealed interface UiEvent {
     data class RequestResources(val draft: CallQueryDraft, val revision: Long) : UiEvent
     data class CorrectTranscript(val clipId: ClipId, val text: String, val revision: Long) : UiEvent
     data class Answer(val text: String, val revision: Long) : UiEvent
-    data class ExportConsent(val fields: Set<ExportField>, val revision: Long, val snippet: String? = null, val keyword: String? = null) : UiEvent
+    data class ExportConsent(val fields: Set<ExportField>, val revision: Long, val snippet: String? = null, val keyword: String? = null, val inputRevision: Long) : UiEvent
     data object RefreshExportedMemory : UiEvent
     data object DeleteSession : UiEvent
     data object DeleteProfile : UiEvent

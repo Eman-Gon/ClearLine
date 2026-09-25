@@ -141,7 +141,7 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
         Text(state.capture.message ?: "Aim for 20–30 seconds. Recording stops at 30 seconds.")
         val canRecord = state.session == null || state.session.phase == Phase.RECORDING || (state.session.phase == Phase.AWAITING_INPUT && state.session.pendingInput?.reason == "replacement_recording")
         Button(onClick = { if (state.capture.active) onEvent(UiEvent.StopRecording) else onEvent(UiEvent.StartRecording(recordingConsent, if (exportMetrics) setOf(ExportField.MEASUREMENTS) else emptySet())) }, Modifier.fillMaxWidth().testTag("record"), enabled = state.capture.active || (!state.busy && recordingConsent && canRecord)) { Icon(if (state.capture.active) Icons.Default.Close else Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text(if (state.capture.active) "Stop recording" else "Start recording") }
-        if (state.capture.message?.contains("waiting for admission") == true) OutlinedButton({ onEvent(UiEvent.RetryAdmission) }, enabled = !state.busy) { Text("Retry complete clip admission") }
+        if (state.pendingCaptureAdmission) OutlinedButton({ onEvent(UiEvent.RetryAdmission) }, enabled = !state.busy) { Text("Retry complete clip admission") }
         if (state.session?.clips?.isNotEmpty() == true && !state.session.captureFinished) OutlinedButton({ onEvent(UiEvent.FinishCapture) }, enabled = !state.busy && !state.capture.active) { Text("Finish accepted capture") }
         if (state.asr.phase !in setOf(ModelPhase.READY, ModelPhase.INSTALLED)) Info("Transcription model: ${state.asr.phase.name.words()}. A complete clip can wait privately for model setup.")
     }
@@ -153,6 +153,7 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
     val session = state.session
     if (session == null) { Info("Choose a check-in from history, or make a new recording."); return }
     SessionStatus(session, state.busy, onEvent)
+    if (state.pendingCaptureAdmission) OutlinedButton({ onEvent(UiEvent.RetryAdmission) }, enabled = !state.busy) { Text("Retry complete clip admission") }
     val metrics = session.metrics
     Panel {
         Text("The recording · ${session.dataOrigin.name.words()}", style = MaterialTheme.typography.titleLarge)
@@ -195,19 +196,19 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
     val changed = fields != session.consent.exportFields || outgoingSnippet != session.consent.reviewedTranscriptSnippet || outgoingKeyword != session.consent.reviewedKeyword
     Panel {
         Text("Your cloud-export choice", style = MaterialTheme.typography.titleLarge)
-        Text("Off means local-only records. Approval applies to new projections, with no automatic backfill.")
+        Text("Off means local-only records. Saving approves the displayed current summary and future selected projections. Earlier sessions are not automatically backfilled.")
         ExportField.entries.forEach { field -> Choice(field in fields, { checked ->
             fields = if (checked) fields + field else fields - field
             if (field == ExportField.MEASUREMENTS && !checked) fields = fields - ExportField.TRANSCRIPT_SNIPPET
             if (field == ExportField.TRANSCRIPT_SNIPPET) textReviewed = false
-        }, when (field) { ExportField.EVENTS -> "Minimal event IDs and status"; ExportField.MEASUREMENTS -> "Descriptive measurements"; ExportField.WORKFLOW_COUNTS -> "Phase and completed/pending counts"; ExportField.PUBLIC_RESOURCES -> "Public resource facts and citations"; ExportField.TRANSCRIPT_SNIPPET -> "Optional transcript snippet and keyword" }, enabled = !busy && (field != ExportField.TRANSCRIPT_SNIPPET || ExportField.MEASUREMENTS in fields)) }
+        }, when (field) { ExportField.EVENTS -> "Minimal event IDs and status"; ExportField.MEASUREMENTS -> "Descriptive measurements"; ExportField.WORKFLOW_COUNTS -> "Phase and saved action counts"; ExportField.PUBLIC_RESOURCES -> "Public resource facts and citations"; ExportField.TRANSCRIPT_SNIPPET -> "Optional transcript snippet and keyword" }, enabled = !busy && (field != ExportField.TRANSCRIPT_SNIPPET || ExportField.MEASUREMENTS in fields)) }
         if (includesText) {
             Text("Review the exact text for RawTree. Remove names, contact details and private information yourself; automatic topic selection is not a privacy guarantee. Leave either field blank to omit it.")
             OutlinedTextField(snippet, { snippet = it.take(200) }, Modifier.fillMaxWidth().testTag("export-snippet"), label = { Text("Snippet · up to 200 characters") }, minLines = 2)
             OutlinedTextField(keyword, { keyword = it.take(40) }, Modifier.fillMaxWidth().testTag("export-keyword"), label = { Text("Keyword · up to 40 characters") }, singleLine = true)
             Choice(textReviewed, { textReviewed = it }, "I approve these exact optional text values for RawTree.")
         }
-        OutlinedButton({ onEvent(UiEvent.ExportConsent(fields, session.consent.exportRevision, outgoingSnippet, outgoingKeyword)) }, modifier = Modifier.testTag("save-export"), enabled = !busy && changed && (!includesText || textReviewed)) { Text("Save export choices") }
+        OutlinedButton({ onEvent(UiEvent.ExportConsent(fields, session.consent.exportRevision, outgoingSnippet, outgoingKeyword, session.inputRevision)) }, modifier = Modifier.testTag("save-export"), enabled = !busy && changed && (!includesText || textReviewed)) { Text(if (fields.isEmpty()) "Save local-only choice" else "Approve current summary export choices") }
         Text("${session.cloudSync.delivered} delivered · ${session.cloudSync.pending} pending · ${session.cloudSync.failed} failed", style = MaterialTheme.typography.bodySmall)
         Text("Revocation cancels unsent exports. It cannot recall already delivered or in-flight requests.", style = MaterialTheme.typography.bodySmall)
     }
@@ -256,7 +257,16 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
     }
     session.approvedResources?.let { request ->
         val committed = session.actions.any { it.status == ActionStatus.SUCCEEDED && (it.result as? ActionResult.Search)?.value?.approvalId == request.approvalId }
-        Panel { Text(if (committed) "Nimble searched" else "Approved search · not yet committed", style = MaterialTheme.typography.titleMedium); Text(request.queryDraft?.query ?: "${request.category.name.words()} near ${request.city}"); Text("City: ${request.city}", style = MaterialTheme.typography.bodySmall) }
+        Panel {
+            Text(if (committed) "Nimble searched" else "Approved search · not yet committed", style = MaterialTheme.typography.titleMedium)
+            Text(request.queryDraft?.query ?: "${request.category.name.words()} near ${request.city}")
+            Text("City: ${request.city}", style = MaterialTheme.typography.bodySmall)
+            request.queryDraft?.basis?.let { basis ->
+                Text(if (basis.fallback) "Based on the approved category and city; no supported concern phrase was found." else "Based on a ${basis.concern.name.words().lowercase()} topic in the approved transcript version.")
+                basis.transcriptExcerpt?.let { Text("Local basis: “$it”", style = MaterialTheme.typography.bodySmall) }
+                basis.topMetric?.let { Text("${it.words()}: ${basis.deltaPercent.display()}% difference across ${basis.baselineSessionCount} prior local sessions.", style = MaterialTheme.typography.bodySmall) }
+            }
+        }
     }
     SessionStatus(session, state.busy, onEvent)
     session.pendingInput?.takeIf { session.phase == Phase.AWAITING_INPUT && it.reason !in setOf("replacement_recording", "missing_model", "audio_model_missing") }?.let { input ->
@@ -283,6 +293,7 @@ private fun timestamp(value: Long) = DateFormat.getDateTimeInstance(DateFormat.M
         }
     }
     Panel { Text("The steps so far", style = MaterialTheme.typography.titleLarge); if (session.actions.isEmpty()) Text("No committed agent actions yet."); session.actions.takeLast(8).forEach { action -> Text("${action.proposal.javaClass.simpleName} · ${action.status.name.words()}"); Text(timestamp(action.completedAtMs ?: action.createdAtMs), style = MaterialTheme.typography.bodySmall) } }
+    RawTreeMemoryPanel(session, state.busy, onEvent)
 }
 
 @Composable private fun SetupScreen(state: AppUiState, onEvent: (UiEvent) -> Unit) {

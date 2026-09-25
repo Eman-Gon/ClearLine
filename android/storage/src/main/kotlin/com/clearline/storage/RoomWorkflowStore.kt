@@ -59,7 +59,7 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
 
     override suspend fun applyCommand(mutation: CommandMutation): SessionSnapshot = database.withTransaction { apply(mutation) }
     private suspend fun apply(mutation: CommandMutation): SessionSnapshot {
-        val next = mutation.snapshot
+        var next = mutation.snapshot
         if (dao.tombstoned("session", next.sessionId.value) != 0 || dao.tombstoned("profile", next.profileId.value) != 0) fail(ErrorCode.DELETED, "Deleted state cannot be recreated")
         val profile = dao.profile(next.profileId.value)?.let { decode<LocalProfile>(it.json) } ?: fail(ErrorCode.NOT_FOUND, "Profile does not exist")
         if (profile.dataOrigin != next.dataOrigin) fail(ErrorCode.IDENTITY_CONFLICT, "Profile provenance must match session")
@@ -73,6 +73,7 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
             if (next.profileId != previous.profileId || next.dataOrigin != previous.dataOrigin || next.executionMode != previous.executionMode || next.createdAtMs != previous.createdAtMs || next.task != previous.task) fail(ErrorCode.IDENTITY_CONFLICT, "Session identity cannot change")
             if (next.consent.exportRevision !in previous.consent.exportRevision..previous.consent.exportRevision + 1 || (next.consent.exportFields != previous.consent.exportFields && next.consent.exportRevision != previous.consent.exportRevision + 1)) fail(ErrorCode.STALE_REVISION, "Export approval revision must advance")
         }
+        if (previous != null && (!next.consent.exportFields.containsAll(previous.consent.exportFields) || next.consent.reviewedTranscriptSnippet != previous.consent.reviewedTranscriptSnippet || next.consent.reviewedKeyword != previous.consent.reviewedKeyword)) next = next.copy(rawTreeMemory = null)
         val checkpoint = mutation.checkpoint
         if (checkpoint.sessionId != next.sessionId || checkpoint.profileId != next.profileId || checkpoint.inputRevision != next.inputRevision || checkpoint.stateVersion != next.stateVersion || checkpoint.phase != next.phase || checkpoint.dataOrigin != next.dataOrigin || checkpoint.scopeRevision != scopeRevision(next, checkpoint.workflowScope)) fail(ErrorCode.INVALID_INPUT, "Checkpoint must describe committed state")
         if (next.approvedResources?.sessionId?.let { it != next.sessionId } == true) fail(ErrorCode.IDENTITY_CONFLICT, "Resource approval belongs to another session")
@@ -112,7 +113,9 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
             val old = dao.source(row.evidenceId, row.version)
             if (old == null) dao.source(row) else if (old != row) fail(ErrorCode.IDENTITY_CONFLICT, "Evidence versions are immutable")
         }
+        if (mutation.summary == null && next.summaryVersion != (previous?.summaryVersion ?: 0)) fail(ErrorCode.INVALID_INPUT, "Summary version changes require a committed summary")
         mutation.summary?.let { summary ->
+            if (next.summaryVersion != summary.version || next.metrics != summary.metrics || summary.completedAtMs < next.createdAtMs) fail(ErrorCode.INVALID_INPUT, "Snapshot and summary must agree")
             if (summary.sessionId != next.sessionId || summary.profileId != next.profileId || summary.dataOrigin != next.dataOrigin || summary.inputRevision != next.inputRevision || summary.task != next.task) fail(ErrorCode.IDENTITY_CONFLICT, "Summary identity mismatch")
             val clips = dao.clips(next.sessionId.value).map { decode<StoredClip>(it.json) }.filter { it.supersededBy == null }
             if (clips.isEmpty() || clips.any { it.result == null } || clips.map { it.clip.clipId }.toSet() != summary.clipIds.toSet() || MeasurementMath.pool(clips.map { it.result!!.metrics }) != summary.metrics) fail(ErrorCode.INVALID_INPUT, "Summary must pool accepted current clips")
@@ -132,7 +135,8 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
             if (existing.copy(status = job.status, claimToken = job.claimToken, updatedAtMs = job.updatedAtMs, attempt = job.attempt) != job) fail(ErrorCode.IDENTITY_CONFLICT, "Job identity reused")
             if (existing.status in setOf(JobStatus.COMPLETED, JobStatus.CLAIMED, JobStatus.PENDING)) return
         }
-        dao.job(jobRow(job.copy(attempt = existing?.attempt ?: job.attempt)))
+        val row = jobRow(job.copy(attempt = existing?.attempt ?: job.attempt))
+        if (existing == null) dao.insertJob(row) else dao.job(row)
     }
 
     override suspend fun admitClip(clip: CompletedLocalClip, acceptedAtMs: Long): ClipReceipt {
@@ -229,7 +233,13 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
     }
     override suspend fun getPendingPlan(sessionId: SessionId): ActionRecord? = database.withTransaction {
         val session = active(sessionId)
-        dao.actions(sessionId.value).map { decode<ActionRecord>(it.json) }.lastOrNull { it.status in setOf(ActionStatus.PLANNED, ActionStatus.RUNNING, ActionStatus.UNKNOWN) && it.scopeRevision == scopeRevision(session, it.scope) }
+        val plans = dao.actions(sessionId.value).map { decode<ActionRecord>(it.json) }.filter { it.status in setOf(ActionStatus.PLANNED, ActionStatus.RUNNING, ActionStatus.UNKNOWN) && it.scopeRevision == scopeRevision(session, it.scope) }
+        val claimedJob = dao.jobs(sessionId.value).firstOrNull { it.status == JobStatus.CLAIMED.name }
+        if (claimedJob != null) return@withTransaction plans.singleOrNull { it.jobId.value == claimedJob.jobId }
+        val checkpoint = dao.checkpoint(sessionId.value)?.let { decode<AgentCheckpoint>(it.json) }
+        plans.firstOrNull { it.actionId == checkpoint?.pendingActionId }
+            ?: plans.lastOrNull { it.scope == checkpoint?.workflowScope }
+            ?: plans.lastOrNull()
     }
     override suspend fun persistPlan(claim: JobClaim, action: ActionRecord): ActionRecord = database.withTransaction {
         val (session, job) = requireClaim(claim)
@@ -284,7 +294,7 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
         if (job.kind != JobKind.PROCESS_AUDIO || job.clipId != commit.result.clipId || commit.mutation.snapshot.sessionId != session.sessionId) fail(ErrorCode.IDENTITY_CONFLICT, "Audio result must match claimed clip")
         val stored = dao.clip(commit.result.clipId.value)?.let { decode<StoredClip>(it.json) } ?: fail(ErrorCode.NOT_FOUND, "Accepted clip is missing")
         val metrics = commit.result.metrics
-        if (stored.supersededBy != null || stored.result != null || metrics.dataOrigin != stored.clip.dataOrigin || metrics.measurementVersion != stored.clip.measurementVersion || kotlin.math.abs(metrics.durationSeconds - stored.clip.durationSeconds) > 1.0 / 16000.0 || metrics.quality != AudioQuality.ACCEPTED || metrics.wordCount == 0 || metrics.energyRms <= 0.0 || metrics.wordCount != MeasurementMath.countEnglishWords(commit.result.transcript)) fail(ErrorCode.INVALID_INPUT, "Audio result does not describe accepted current input")
+        if (stored.supersededBy != null || stored.result != null || metrics.dataOrigin != stored.clip.dataOrigin || metrics.measurementVersion != stored.clip.measurementVersion || kotlin.math.abs(metrics.durationSeconds - stored.clip.durationSeconds) > 1.0 / 16000.0 || metrics.quality != AudioQuality.ACCEPTED || metrics.wordCount == 0 || metrics.energyRms <= 0.0 || kotlin.math.abs(metrics.recordingWpm - metrics.wordCount * 60.0 / metrics.durationSeconds) > 1e-8 || metrics.wordCount != MeasurementMath.countEnglishWords(commit.result.transcript)) fail(ErrorCode.INVALID_INPUT, "Audio result does not describe accepted current input")
         dao.updateClip(clipRow(stored.copy(result = commit.result)))
         val result = apply(commit.mutation.copy(snapshot = commit.mutation.snapshot.copy(clips = emptyList())))
         dao.job(jobRow(job.copy(status = JobStatus.COMPLETED, claimToken = null, updatedAtMs = result.updatedAtMs)))
@@ -296,7 +306,11 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
         commit.actionId?.let { id ->
             val action = dao.action(id.value)?.let { decode<ActionRecord>(it.json) } ?: fail(ErrorCode.NOT_FOUND, "Failed plan is missing")
             if (action.jobId != job.jobId) fail(ErrorCode.IDENTITY_CONFLICT, "Failed plan does not match claim")
-            dao.updateAction(actionRow(action.copy(status = if (commit.retrySameAction) ActionStatus.UNKNOWN else ActionStatus.FAILED, error = commit.error)))
+            val toolMessage = if (commit.retrySameAction) null else {
+                commit.mutation.checkpoint.exchanges.lastOrNull { it.role == ChatRole.TOOL && it.toolCallId == action.toolCallId }
+                    ?: fail(ErrorCode.IDENTITY_CONFLICT, "Completed failed action requires its matching tool message")
+            }
+            dao.updateAction(actionRow(action.copy(status = if (commit.retrySameAction) ActionStatus.UNKNOWN else ActionStatus.FAILED, error = commit.error, toolMessage = toolMessage, completedAtMs = if (commit.retrySameAction) null else commit.failedAtMs)))
         }
         val next = apply(commit.mutation)
         dao.job(jobRow(job.copy(status = if (commit.retrySameAction) JobStatus.FAILED else JobStatus.COMPLETED, claimToken = null, updatedAtMs = commit.failedAtMs)))
@@ -400,7 +414,7 @@ class RoomWorkflowStore(val database: ClearLineDatabase, private val audioDirect
     override suspend fun revokeExportConsent(sessionId: SessionId, expectedConsentRevision: Long, nowMs: Long): SessionSnapshot = database.withTransaction {
         val old = active(sessionId)
         if (old.consent.exportRevision != expectedConsentRevision) fail(ErrorCode.STALE_REVISION, "Export approval already changed")
-        val next = old.copy(stateVersion = old.stateVersion + 1, updatedAtMs = nowMs, consent = old.consent.copy(exportFields = emptySet(), exportRevision = old.consent.exportRevision + 1, updatedAtMs = nowMs, reviewedTranscriptSnippet = null, reviewedKeyword = null))
+        val next = old.copy(stateVersion = old.stateVersion + 1, updatedAtMs = nowMs, rawTreeMemory = null, consent = old.consent.copy(exportFields = emptySet(), exportRevision = old.consent.exportRevision + 1, updatedAtMs = nowMs, reviewedTranscriptSnippet = null, reviewedKeyword = null))
         val cp = getCheckpoint(sessionId) ?: fail(ErrorCode.NOT_FOUND, "Checkpoint is missing")
         apply(CommandMutation(old.stateVersion, old.inputRevision, next, cp.copy(stateVersion = next.stateVersion)))
     }

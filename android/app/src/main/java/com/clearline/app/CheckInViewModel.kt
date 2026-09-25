@@ -23,6 +23,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
     private val uiCommands = Mutex()
     private var pendingCommands = 0
     private var creatingSession = false
+    private var backgroundWork: Job? = null
 
     init {
         viewModelScope.launch { graph.liquid.status.collect { value -> stateMutable.update { it.copy(liquid = value) } } }
@@ -30,7 +31,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch { graph.sponsors.credentials.observeStatus().collect { value -> stateMutable.update { it.copy(credentials = value) } } }
         viewModelScope.launch { graph.sponsors.credentials.observeConfiguration().collect { value -> stateMutable.update { it.copy(sponsorConfiguration = value) } } }
         viewModelScope.launch { graph.deliveryMessage.collect { value -> stateMutable.update { it.copy(message = value) } } }
-        viewModelScope.launch { graph.pendingCapture.collect { clip -> if (clip != null) stateMutable.update { it.copy(capture = it.capture.copy(message = "Complete clip waiting for admission.")) } } }
+        viewModelScope.launch { graph.pendingCapture.collect { clip -> stateMutable.update { it.copy(pendingCaptureAdmission = clip != null) } } }
         viewModelScope.launch {
             graph.recorder.state.collect { capture ->
                 when (capture) {
@@ -39,7 +40,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                     is CaptureState.Interrupted -> stateMutable.update { it.copy(capture = CaptureUi(message = capture.reason)) }
                     is CaptureState.Failed -> stateMutable.update { it.copy(capture = CaptureUi(message = capture.error.message), error = capture.error.message) }
                     is CaptureState.Finalized -> {
-                        stateMutable.update { it.copy(capture = CaptureUi(elapsedMs = (capture.clip.durationSeconds * 1000).toLong(), message = "Complete clip waiting for admission."), screen = Screen.SUMMARY) }
+                        stateMutable.update { it.copy(capture = CaptureUi(elapsedMs = (capture.clip.durationSeconds * 1000).toLong(), message = "Recording complete."), screen = Screen.SUMMARY) }
                     }
                 }
             }
@@ -86,7 +87,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
             }
             is UiEvent.CorrectTranscript -> runCommand { currentSession()?.let { graph.coordinator.applyInput(RevisionedUserInput(it.sessionId, event.revision, UserInput.TranscriptCorrection(event.clipId, event.text))) } }
             is UiEvent.Answer -> runCommand { currentSession()?.let { graph.coordinator.applyInput(RevisionedUserInput(it.sessionId, event.revision, UserInput.Answer(event.text))) } }
-            is UiEvent.ExportConsent -> runCommand { currentSession()?.let { graph.coordinator.setExportConsent(ExportConsentChange(it.sessionId, event.revision, event.fields, reviewedTranscriptSnippet = event.snippet, reviewedKeyword = event.keyword)) } }
+            is UiEvent.ExportConsent -> runCommand { currentSession()?.let { graph.coordinator.setExportConsent(ExportConsentChange(it.sessionId, event.revision, event.fields, reviewedTranscriptSnippet = event.snippet, reviewedKeyword = event.keyword, expectedInputRevision = event.inputRevision)) } }
             UiEvent.RefreshExportedMemory -> runCommand { currentSession()?.let { graph.coordinator.refreshExportedMemory(it.sessionId) } }
             UiEvent.DeleteSession -> runCommand { currentSession()?.let { graph.coordinator.deleteSession(it.sessionId) }; sessionObservation?.cancel(); preferences.edit().remove("session").apply(); stateMutable.update { it.copy(session = null, screen = Screen.HOME, message = "Local check-in deleted. Delivered cloud records are unchanged.") } }
             UiEvent.DeleteProfile -> runCommand { state.value.profile?.let { graph.coordinator.deleteProfile(it.profileId) }; sessionObservation?.cancel(); historyObservation?.cancel(); followUpObservation?.cancel(); preferences.edit().clear().apply(); stateMutable.update { it.copy(profile = null, session = null, history = emptyList(), openFollowUps = emptyList(), screen = Screen.SETUP) } }
@@ -104,7 +105,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         }
     }
     fun importModel(kind: ModelKind, uri: Uri) = runCommand {
-        if (state.value.capture.active) throw ClearLineException(AppError(ErrorCode.INVALID_STATE, "Stop recording before importing a model."))
+        if (state.value.capture.active) throw ClearLineException(AppError(ErrorCode.INVALID_INPUT, "Stop recording before importing a model."))
         val identity = if (kind == ModelKind.LIQUID) LiquidModelCatalog.DEFAULT else WhisperModelManifest.identity
         val approved = ApprovedModelArtifact(identity, uri.toString(), System.currentTimeMillis())
         if (kind == ModelKind.LIQUID) graph.liquid.install(approved) else graph.asr.install(approved)
@@ -112,7 +113,14 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
     fun permissionDenied() { stateMutable.update { it.copy(error = "Microphone permission was denied. You can grant it in Android settings and try again.") } }
     fun reportActionError(message: String) { stateMutable.update { it.copy(error = message) } }
     fun foreground() { graph.foreground() }
-    fun background() { graph.markBackground(); graph.scope.launch { graph.background() } }
+    fun background() {
+        graph.markBackground()
+        val previous = backgroundWork
+        backgroundWork = graph.scope.launch {
+            try { previous?.join(); graph.background() }
+            catch (failure: Exception) { displayFailure(failure) }
+        }
+    }
     private suspend fun startRecording(event: UiEvent.StartRecording, generation: Long?) {
         require(event.consent) { "Recording consent is required." }
         if (creatingSession || state.value.capture.active || graph.pendingCapture.value != null) return
@@ -128,7 +136,9 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                 session = graph.store.getSession(id)
             }
             requireNotNull(session)
-            if (session.phase != Phase.RECORDING && !(session.phase == Phase.AWAITING_INPUT && session.pendingInput?.reason == "replacement_recording")) throw ClearLineException(AppError(ErrorCode.INVALID_STATE, "This check-in is not waiting for a recording."))
+            if (session.phase != Phase.RECORDING && !(session.phase == Phase.AWAITING_INPUT && session.pendingInput?.reason == "replacement_recording")) throw ClearLineException(AppError(ErrorCode.INVALID_INPUT, "This check-in is not waiting for a recording."))
+            // A rapid reopen cannot let an older asynchronous pause interrupt a new capture.
+            backgroundWork?.join()
             graph.startRecording(generation, session)
         } finally { creatingSession = false }
     }

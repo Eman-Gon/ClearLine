@@ -118,7 +118,7 @@ class PcmAudioRecorder(
             if (interrupted.get()) { mutableState.value = CaptureState.Interrupted(); return null }
             val pcm = PcmWave.finalize(part, target, count)
             // Persist rename metadata before returning the durable complete-file receipt.
-            val dirFd = Os.open(directory.path, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY, 0)
+            val dirFd = Os.open(directory.path, OsConstants.O_RDONLY, 0)
             try { Os.fsync(dirFd) } finally { Os.close(dirFd) }
             val clip = CompletedLocalClip(sessionId, clipId, target.canonicalPath, PcmWave.sha256(target), pcm.durationSeconds, origin, createdAtMs = System.currentTimeMillis())
             mutableState.value = CaptureState.Finalized(clip)

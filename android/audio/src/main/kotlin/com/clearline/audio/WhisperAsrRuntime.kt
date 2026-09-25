@@ -47,7 +47,7 @@ class WhisperAsrRuntime(context: Context, private val arbiter: SharedModelArbite
                     job.ensureActive(); mutableStatus.value = ModelStatus(ModelKind.WHISPER, if (count == artifact.identity.sizeBytes) ModelPhase.VERIFYING else ModelPhase.INSTALLING, artifact.identity, count)
                 }
             }
-            val fd = Os.open(directory.path, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY, 0)
+            val fd = Os.open(directory.path, OsConstants.O_RDONLY, 0)
             try { Os.fsync(fd) } finally { Os.close(fd) }
             set(ModelPhase.INSTALLED)
         } catch (cancelled: CancellationException) { set(ModelPhase.MISSING); throw cancelled }

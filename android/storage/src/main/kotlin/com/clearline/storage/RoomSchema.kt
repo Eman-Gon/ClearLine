@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.Flow
     @Query("SELECT * FROM clips WHERE sessionId=:id") abstract suspend fun clips(id: String): List<ClipRow>
     @Query("DELETE FROM clips WHERE sessionId=:id") abstract suspend fun deleteClips(id: String)
     @Upsert abstract suspend fun job(row: JobRow)
+    @Insert(onConflict = OnConflictStrategy.ABORT) abstract suspend fun insertJob(row: JobRow)
     @Query("SELECT * FROM jobs WHERE jobId=:id") abstract suspend fun job(id: String): JobRow?
     @Query("SELECT * FROM jobs WHERE sessionId=:id ORDER BY createdAtMs, jobId") abstract suspend fun jobs(id: String): List<JobRow>
     @Query("DELETE FROM jobs WHERE sessionId=:id") abstract suspend fun deleteJobs(id: String)

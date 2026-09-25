@@ -34,5 +34,6 @@ class RoomMigrationTest {
             assertTrue(migrated.pendingFileCleanup().isEmpty())
         }
         file.delete()
+        Unit
     }
 }

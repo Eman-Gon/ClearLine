@@ -36,4 +36,6 @@ gradle --offline --no-daemon --configure-on-demand \
 
 Configuration on demand permits this JVM-only verification without configuring the Android native modules. Initial sandboxed Gradle attempts could not open its daemon socket; the successful run used the approved host execution path. The Gradle wrapper download also needs network or its cached distribution.
 
+Integration verification is recorded in [`sponsors/README.md`](../sponsors/README.md) and [`agent/README.md`](../agent/README.md). The sponsor harness passed 68 core/sponsor tests, including exact-query transmission, logical history counts, authentic session chronology, and revoked dispatch authorization. Native screen source compatibility was also checked with the Compose compiler and Android API dependencies on the host; this is not an APK installation or visual/device test.
+
 The S24 capture, inference, sponsor write/readback, UI, and process-recovery gates still require a connected device, configured credentials, and explicitly approved test data. A successful JVM test or APK build does not satisfy those gates.
