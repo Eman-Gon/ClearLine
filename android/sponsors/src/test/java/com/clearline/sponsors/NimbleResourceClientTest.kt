@@ -80,6 +80,37 @@ class NimbleResourceClientTest {
         assertNull(result.candidates.single().description)
     } }
 
+    @Test fun longProviderDescriptionsRemainBoundedSearchPreviews() { runBlocking {
+        // Live Search returned 8–13K characters despite full_content=false.
+        val descriptions = listOf(10184, 12853, 8328).map { "d".repeat(it) }
+        val response = buildJsonObject {
+            put("results", buildJsonArray {
+                descriptions.forEachIndexed { index, description -> add(buildJsonObject {
+                    put("title", "Support $index")
+                    put("url", "$url/$index")
+                    put("description", description)
+                }) }
+            })
+        }
+        val result = NimbleResourceClient(Http(response), Authorization(), dns).search(request)
+        assertEquals(3, result.candidates.size)
+        result.candidates.forEach { assertEquals("d".repeat(4000), it.description) }
+    } }
+
+    @Test fun descriptionPreviewDoesNotSplitUnicodeOrAcceptNonText() { runBlocking {
+        fun response(description: JsonElement) = buildJsonObject {
+            put("results", buildJsonArray { add(buildJsonObject {
+                put("title", "Support"); put("url", url); put("description", description)
+            }) })
+        }
+        val description = "d".repeat(3999) + "\uD83C\uDF33" + "remaining excerpt"
+        val result = NimbleResourceClient(Http(response(JsonPrimitive(description))), Authorization(), dns).search(request)
+        assertEquals("d".repeat(3999), result.candidates.single().description)
+        fails(ErrorCode.BAD_RESPONSE) {
+            NimbleResourceClient(Http(response(buildJsonObject { put("unexpected", "object") })), Authorization(), dns).search(request)
+        }
+    } }
+
     @Test fun reviewedQueryIsExactWhileTranscriptAndBasisStayLocal() { runBlocking {
         val query = "community communication caregiver education in Oakland"
         val draft = CallQueryDraft(query, request.city, request.category,

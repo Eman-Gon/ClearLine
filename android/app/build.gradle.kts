@@ -11,8 +11,8 @@ android {
         applicationId = "com.clearline.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1-native"
+        versionCode = 2
+        versionName = "0.1.1-native"
         ndk { abiFilters += "arm64-v8a" }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

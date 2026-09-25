@@ -51,7 +51,7 @@ class NimbleResourceClient internal constructor(
             val title = optionalText(row, "title", 500) ?: return@mapNotNull null
             ResourceCandidate(
                 candidateId = sha256(url), title = title, url = url,
-                description = optionalText(row, "description", 4000),
+                description = searchDescription(row),
                 requestId = requestId, retrievedAtMs = retrievedAt,
             )
         }.distinctBy { it.candidateId }
@@ -164,6 +164,19 @@ private fun optionalText(objectValue: JsonObject, key: String, max: Int): String
         ?: badResponse("Nimble returned an invalid text field.")
     if (text.length > max) badResponse("Nimble text exceeds the field limit.")
     return text.takeIf { it.isNotBlank() }
+}
+
+/** Search descriptions can contain long page excerpts even with full_content=false.
+ * Keep only a display preview; source evidence still comes from a separate extract.
+ */
+private fun searchDescription(row: JsonObject): String? {
+    val value = row["description"] ?: return null
+    if (value is JsonNull) return null
+    val text = (value as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?: badResponse("Nimble returned an invalid description field.")
+    var end = minOf(text.length, 4000)
+    if (end < text.length && text[end - 1].isHighSurrogate()) end--
+    return text.substring(0, end).takeIf { it.isNotBlank() }
 }
 
 internal fun nimbleCandidateId(url: String): String = sha256(PublicSourceUrls.normalize(url))
