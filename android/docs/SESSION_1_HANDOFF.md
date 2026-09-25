@@ -48,7 +48,7 @@ define the final integration API.
 | Room generation and transactions | 16 tests passed with actual Room 2.7.1 KSP generation and Robolectric | Host SQLite, not a killed phone process |
 | Agent/inference and sponsors | Separate session reports in their module READMEs | Doubles/host probes are explicitly identified there |
 | UI instrumentation | Written for observation, exact search approval and snippet approval | Not run; Android build/device required |
-| Full Android APK | Not run to completion | SDK packages/license approval pending |
+| Full Android APK | Debug APK built; all 170 module unit tests passed; signing, native exports, ABI and 16 KiB alignment passed | Host build/package verification; no phone runtime test. See [build record](APK_BUILD.md) |
 | S24 acceptance | Not run | No S24 attached to adb |
 
 Focused app authorization tests and Room checks are reproducible through the checked-in
@@ -57,12 +57,13 @@ test total: several temporary harnesses include the same 24 core tests.
 
 Host compilation found and fixed public Android API incompatibilities in directory fsync.
 A static build review also aligned the storage minimum SDK with the API 26 application.
-These checks reduce integration risk but cannot establish a successful APK.
+These earlier host checks reduced integration risk. The subsequent [full Android build](APK_BUILD.md) established APK assembly and packaging; phone behavior remains unverified.
 
 ## Required Android and S24 acceptance
 
-After SDK license approval and toolchain provisioning, run the commands in the Android
-README. Keep the build log and APK SHA-256. Inspect the APK for only the intended ABI,
+SDK license approval, toolchain provisioning and the full build are complete. The
+build log, APK SHA-256 and packaging checks are recorded in [APK build evidence](APK_BUILD.md).
+Inspect future APKs for only the intended ABI,
 both JNI libraries, isolated ggml symbols, no bundled weights, no secrets and no desktop
 server addresses. Run unit tests and instrumentation, including the native UI tests.
 
@@ -86,10 +87,13 @@ audio deletion; admitted unfinished input remains for retry. Orphan/partial file
 cleaned on startup. Other local records remain until session/profile deletion. Delivered
 cloud data cannot be recalled by local deletion or consent revocation.
 
-## Current blocking prerequisites
+## Current build status
 
-The host has a checksum-verified JDK 17/Gradle and downloaded command-line tools in
-`/private/tmp/clearline-android-toolchain`. Installing the Android platform, build tools,
-NDK and CMake requires accepting Google's SDK agreement; the user's approval question
-is pending. No automatic acceptance was performed. No physical S24 is connected.
-The [toolchain guide](TOOLCHAIN.md) gives the exact follow-on commands.
+The user explicitly accepted Google's Android SDK agreement. JDK 17, Gradle, the Android
+platform, build tools, NDK and CMake are installed. The toolchain and Android build copy
+have been moved to the user-selected T7 SSD and verified; the original repository remains
+the source authority. Full Gradle unit tests and `:app:assembleDebug` passed on the
+external volume, along with APK signing and native packaging checks. No physical S24
+was connected, so installation and device acceptance remain **NOT RUN**. The user's
+friend can install the provided APK using the [phone guide](PHONE_TESTING.md), without
+building it. The [toolchain guide](TOOLCHAIN.md) gives the storage layout and rebuild commands.

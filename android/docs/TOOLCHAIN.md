@@ -18,14 +18,14 @@ This downloads checksum-pinned Gradle 8.11.1 and Temurin JDK 17.0.20.1+1. It pro
 ```sh
 ./tools/setup-toolchain.sh --install-sdk
 source /private/tmp/clearline-android-toolchain/env.sh
-./gradlew --no-daemon :core:test :app:assembleDebug
+gradle --no-daemon :core:test :app:assembleDebug
 ```
 
 The script lets `sdkmanager` prompt for licenses; it does not pipe automatic acceptance. It installs command-line tools build 15859902 (tool revision 22.0), platform-tools, API 35, build-tools 35.0.0, NDK 27.2.12479018, and CMake 3.22.1. Command-line tools are taken from the [official Android download page](https://developer.android.com/studio). On other hosts, install equivalent packages and use a JDK 17 distribution appropriate to that host.
 
 ```sh
 adb devices -l
-./gradlew :app:installDebug
+gradle :app:installDebug
 ```
 
 Installation requires a connected device with USB debugging enabled and its authorization prompt accepted on the device. A successful APK build does not prove S24 recording, model execution, offline operation, or recovery.
@@ -50,10 +50,10 @@ After reconnecting T7, mount the bundle if `/Volumes/ClearLineBuild` is not alre
 hdiutil attach /Volumes/T7/ClearLine-build/ClearLineBuild.sparsebundle
 source /Volumes/ClearLineBuild/toolchain/env.sh
 cd /Volumes/ClearLineBuild/project/android
-./gradlew --no-daemon :core:test :app:assembleDebug
+gradle --no-daemon :core:test :app:assembleDebug
 ```
 
-The generated `env.sh` uses the actual SSD paths. `/private/tmp/clearline-android-toolchain` is retained as a compatibility symlink to `/Volumes/ClearLineBuild/toolchain`, but the symlink itself may disappear when macOS cleans temporary storage. Prefer the persistent path above. If the environment file must be regenerated, use the existing helper:
+The generated `env.sh` uses the actual SSD paths and places the already extracted Gradle 8.11.1 on `PATH`. The `gradle` command above reuses that installation without downloading another wrapper distribution. `/private/tmp/clearline-android-toolchain` is retained as a compatibility symlink to `/Volumes/ClearLineBuild/toolchain`, but the symlink itself may disappear when macOS cleans temporary storage. Prefer the persistent path above. If the environment file must be regenerated, use the existing helper:
 
 ```sh
 CLEARLINE_TOOLCHAIN_ROOT=/Volumes/ClearLineBuild/toolchain \
@@ -69,7 +69,9 @@ rsync -a --exclude '/.gradle/' --exclude '/.kotlin/' \
   /Users/emanschool/ClearLine/android/ /Volumes/ClearLineBuild/project/android/
 ```
 
-The T7 migration and full build are in progress. This storage setup does not itself establish a successful APK or device test.
+The T7 migration completed on September 25, 2026. A checksum-based `rsync` dry run found no differences in the copied toolchain, and Java, CMake, Clang, AAPT2 and Gradle executed successfully from the external volume. Only after verification was the old internal toolchain removed and replaced with the compatibility symlink. Internal free space increased from approximately 1.5 GiB to 6.3 GiB at that point.
+
+The Android source build copy is on the external volume. The full Gradle build covering all seven modules' unit tests plus `:app:assembleDebug` completed successfully there: 170 tests passed with no failures or skips. APK signature, native exports, ABI and 16 KiB alignment checks also passed. See [APK build evidence](APK_BUILD.md). Phone installation and device tests remain unverified.
 
 ## Bootstrap evidence — September 25, 2026
 
@@ -101,4 +103,4 @@ The installed package metadata records:
 | NDK | 27.2.12479018 |
 | CMake | 3.22.1 |
 
-Revisions above were read from each installed package's `package.xml`, except command-line tools, which provides `source.properties`. The full Android Gradle tests and `:app:assembleDebug` are now in progress; this entry does not claim a successful build or APK. The current `adb devices -l` check returned no attached device, so phone installation and S24 hardware acceptance remain **NOT RUN**.
+Revisions above were read from each installed package's `package.xml`, except command-line tools, which provides `source.properties`. The full Android Gradle tests and `:app:assembleDebug` subsequently passed; the [build record](APK_BUILD.md) identifies the APK and verification evidence. No device was attached for this build. The user's friend will perform phone setup using the [phone testing guide](PHONE_TESTING.md); installation and S24 hardware acceptance remain **NOT RUN**.
