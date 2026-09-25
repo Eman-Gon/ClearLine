@@ -14,12 +14,15 @@ from fastapi.staticfiles import StaticFiles
 from backend.api.config import Settings
 from backend.api.routes import make_router, UploadLimitMiddleware
 from backend.audio import AudioProcessor
+from backend.calls.routes import make_call_router
+from backend.autonomous.routes import make_family_router
+from backend.autonomous.worker import PhoneWorker
 from backend.storage import Store
 from backend.worker.runner import Worker
 from backend.worker.interfaces import UnavailableRunner
 
 
-def create_app(settings: Settings | None = None, *, audio_processor=None, agent_runner=None, exporter=None):
+def create_app(settings: Settings | None = None, *, audio_processor=None, agent_runner=None, exporter=None, vapi_settings=None, vapi_client=None):
     settings = settings or Settings()
     store = Store(settings.database_path)
     Path(settings.upload_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -47,14 +50,22 @@ def create_app(settings: Settings | None = None, *, audio_processor=None, agent_
             lock.close()
             raise RuntimeError('ClearLine requires one application process per database.')
         task = None
+        phone_task = None
         try:
             store.recover()
             worker.cleanup_media()
             if settings.worker_enabled:
                 task = asyncio.create_task(worker.run())
+                phone_task = asyncio.create_task(app.state.phone_worker.run())
             yield
         finally:
             worker.stop_requested = True
+            app.state.phone_worker.stopping = True
+            if phone_task:
+                phone_task.cancel()
+                try: await phone_task
+                except asyncio.CancelledError: pass
+            await app.state.phone_worker.close()
             if task:
                 await task
             for service in (agent_runner,exporter):
@@ -70,6 +81,10 @@ def create_app(settings: Settings | None = None, *, audio_processor=None, agent_
     app.state.settings = settings
     app.add_middleware(UploadLimitMiddleware, max_bytes=settings.max_upload_bytes + 65536)
     app.include_router(make_router(store, settings))
+    call_router=make_call_router(store, settings, vapi_settings, vapi_client)
+    app.include_router(call_router)
+    app.state.phone_worker=PhoneWorker(store,call_router.dispatch_call)
+    app.include_router(make_family_router(store,settings))
 
     @app.get('/api/health')
     def health():
@@ -89,6 +104,10 @@ def create_app(settings: Settings | None = None, *, audio_processor=None, agent_
             'pairing_configured': bool(settings.pairing_code),
             'integration_status': 'adapter_loaded' if available else 'agent_unavailable',
         }
+
+    @app.get('/calls')
+    def calls_page():
+        return FileResponse(Path(settings.frontend_dir) / 'calls.html')
 
     @app.get('/')
     def index():

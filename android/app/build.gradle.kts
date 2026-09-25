@@ -10,9 +10,13 @@ android {
     defaultConfig {
         applicationId = "com.clearline.app"
         minSdk = 26
+        for (key in listOf("FIREBASE_APP_ID", "FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_SENDER_ID")) {
+            val value = providers.gradleProperty(key).orElse(providers.environmentVariable(key)).getOrElse("")
+            buildConfigField("String", key, "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+        }
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1-native"
+        versionCode = 3
+        versionName = "0.2.0-calling"
         ndk { abiFilters += "arm64-v8a" }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -23,6 +27,8 @@ android {
     packaging { resources.excludes += setOf("/META-INF/{AL2.0,LGPL2.1}") }
 }
 dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
+    implementation("com.google.firebase:firebase-messaging")
     implementation(project(":core"))
     implementation(project(":storage"))
     implementation(project(":audio"))

@@ -4,5 +4,5 @@ import android.app.Application
 
 class ClearLineApplication : Application() {
     val graph: AppGraph by lazy { AppGraph(this) }
-    override fun onCreate() { super.onCreate(); graph.initialize() }
+    override fun onCreate() { super.onCreate(); graph.initialize(); com.clearline.app.family.FamilyPush.initialize(this) }
 }
